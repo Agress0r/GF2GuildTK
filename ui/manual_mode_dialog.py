@@ -406,6 +406,7 @@ class ManualModeDialog(QDialog):
             try:
                 pil = Image.open(self._snip_tmp).copy()
                 self._log(f"✓ Загружен снимок {pil.width}×{pil.height}")
+                self._restore_windows()
                 self._on_snipped(pil)
             except Exception as e:
                 self._restore_windows()
@@ -437,7 +438,6 @@ class ManualModeDialog(QDialog):
         self._log(f"❌ Ошибка QProcess: {error_msg}")
 
     def _on_snipped(self, pil_crop: Image.Image):
-        self.show()
         idx = len(self._images) + 1
         self._add_image(pil_crop, f"snip_{idx}.png")
         self.status_label.setText("Область добавлена.")

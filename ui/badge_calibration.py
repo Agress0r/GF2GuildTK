@@ -368,6 +368,7 @@ class BadgeOffsetCalibrationDialog(QDialog):
         if exit_code == 0 and os.path.exists(self._snip_tmp):
             try:
                 pil = Image.open(self._snip_tmp).copy()
+                self._restore_windows()
                 self._on_snipped(pil)
             except Exception as e:
                 self._restore_windows()
@@ -393,7 +394,6 @@ class BadgeOffsetCalibrationDialog(QDialog):
         self.hint_label.setText(f"⚠ Ошибка процесса: {error_msg}")
 
     def _on_snipped(self, pil_crop: Image.Image):
-        self.show()
         self._set_image(pil_crop)
 
     def _set_image(self, pil_img: Image.Image):

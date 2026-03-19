@@ -551,7 +551,8 @@ class MainWindow(QMainWindow):
             return
         dlg = ManualModeDialog(self._current_season_id, self._current_season_name, self)
         dlg.finished.connect(lambda _: self._load_table())
-        dlg.exec()
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
 
     def _open_calibration(self):
         dlg = CalibrationDialog(self)
@@ -562,7 +563,8 @@ class MainWindow(QMainWindow):
         dlg = BadgeOffsetCalibrationDialog(self)
         dlg.calibration_saved.connect(
             lambda: self.status_bar.setText("Калибровка бейджа сохранена."))
-        dlg.exec()
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
 
     def _open_settings(self):
         SettingsDialog(self).exec()
