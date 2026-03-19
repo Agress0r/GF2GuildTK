@@ -1,0 +1,52 @@
+# Virtual environment
+GF2TTK/
+
+# Vscode & Claude
+.vscode/
+.claude/
+CLAUDE.md
+
+# Unused folders
+export/
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Database (personal data — do not commit)
+*.db
+guild_tracker.db
+
+# Google credentials (sensitive — do not commit!)
+credentials.json
+
+# User settings (personal paths, Google Sheets IDs)
+config/settings.json
+
+# Generated debug images
+debug_crops/*.png
+debug_crops/*.jpg
+
+# Legacy data
+saves_do_not_use/
+
+# Test cache
+.pytest_cache/
+tests/__pycache__/
+ui/__pycache__/
+
+# Test images
+testimages/
+
+# IDE
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.log
