@@ -321,6 +321,7 @@ class BadgeOffsetCalibrationDialog(QDialog):
         self._do_snip()
 
     def _restore_windows(self):
+        QApplication.instance().setQuitOnLastWindowClosed(True)
         for w in getattr(self, "_hidden_windows", []):
             try:
                 w.show()
@@ -335,6 +336,7 @@ class BadgeOffsetCalibrationDialog(QDialog):
             self._hidden_windows = [
                 w for w in QApplication.topLevelWidgets() if w.isVisible()
             ]
+            QApplication.instance().setQuitOnLastWindowClosed(False)
             for w in self._hidden_windows:
                 w.hide()
             QApplication.processEvents()  # let the OS repaint before screenshot
