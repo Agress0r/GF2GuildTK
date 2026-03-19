@@ -89,7 +89,7 @@ scripts\run.bat
 Строка 2:   "Всего очков" — итоговые суммы
 Строки 3+:  игроки: Col A = имя, Col B–H = дни 1–7
 ```
-![Пример таблицы](https://i.imgur.com/NEwcZhQ.png)
+![Пример таблицы](https://i.imgur.com/Lan9TYJ.png)
 ---
 
 ## Структура проекта
