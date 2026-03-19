@@ -1,6 +1,7 @@
 """Main application window."""
 
 from __future__ import annotations
+import os
 import time
 import pyautogui
 from datetime import date as date_type
@@ -13,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 from ui.style_utils import mb_warning, mb_critical, mb_info, mb_question, ask_text, ask_int
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QColor, QFont, QIcon, QAction
+from PyQt6.QtGui import QColor, QFont, QIcon, QAction, QPixmap
 
 import pyautogui
 from db.database import (
@@ -380,7 +381,16 @@ class MainWindow(QMainWindow):
         h = QHBoxLayout(bar)
         h.setContentsMargins(16, 0, 16, 0)
 
-        title = QLabel("⚔  GUILD TRACKER")
+        icon_label = QLabel()
+        ico_path = os.path.join(os.path.dirname(__file__), "..", "GuildBossToolkit.ico")
+        icon_pix = QPixmap(ico_path).scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation)
+        icon_label.setPixmap(icon_pix)
+        icon_label.setFixedSize(36, 36)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        h.addWidget(icon_label)
+
+        title = QLabel("GUILD TRACKER")
         title.setObjectName("app_title")
         h.addWidget(title)
 
@@ -430,6 +440,8 @@ class MainWindow(QMainWindow):
         manual_btn.clicked.connect(self._open_manual_mode)
         v.addWidget(manual_btn)
 
+        v.addSpacing(8)
+
         sheets_btn = QPushButton("📊  Синхронизация с\nGoogle Таблицей")
         sheets_btn.setObjectName("sheets_btn")
         sheets_btn.clicked.connect(self._export_sheets)
@@ -441,7 +453,9 @@ class MainWindow(QMainWindow):
         seasons_btn.setObjectName("seasons_btn")
         seasons_btn.clicked.connect(self._open_seasons)
         v.addWidget(seasons_btn)
-        v.addWidget(action_btn("🔧", "Калибровка авто", self._open_calibration))
+        calib_auto_btn = action_btn("🔧", "Калибровка авто", self._open_calibration)
+        calib_auto_btn.setVisible(False)
+        v.addWidget(calib_auto_btn)
         v.addWidget(action_btn("🎯", "Калибровка бейджа", self._open_badge_calibration))
         v.addWidget(action_btn("⚙", "Настройки",       self._open_settings))
 
