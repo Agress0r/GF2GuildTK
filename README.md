@@ -19,6 +19,7 @@
 ### 1. Скачайте Python 3.12+
 
 Перейдите на [python.org/downloads](https://www.python.org/downloads/) и установите Python.
+Прямая ссылка на [Python 3.12](https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe)
 
 > При установке **обязательно** отметьте галочку **"Add Python to PATH"**
 
