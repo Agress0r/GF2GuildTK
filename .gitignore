@@ -2,6 +2,8 @@
 GF2TTK/
 
 # Vscode & Claude
+GF2TableToolkit.code-workspace
+.code-workspace
 .vscode/
 .claude/
 CLAUDE.md
@@ -14,14 +16,14 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Database (personal data — do not commit)
+# Database
 *.db
 guild_tracker.db
 
-# Google credentials (sensitive — do not commit!)
+# Google credentials
 credentials.json
 
-# User settings (personal paths, Google Sheets IDs)
+# User settings
 config/settings.json
 
 # Generated debug images

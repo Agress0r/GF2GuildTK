@@ -104,27 +104,36 @@ scripts\run.bat
 ## Структура проекта
 
 ```
-GF2TableToolkit/
-├── setup.bat                — установщик окружения
-├── main.py                  — точка входа приложения
-├── requirements.txt         — зависимости Python
-├── GuildBossToolkit.ico     — иконка приложения
-├── assets/
-│   └── badges/              — шаблоны бейджей для распознавания рангов
-├── config/
-│   └── settings_manager.py  — загрузка/сохранение настроек
-├── core/
-│   ├── ocr.py               — OCR (RapidOCR + ddddocr)
-│   ├── badge_detector.py    — детектор бейджей (cv2.matchTemplate)
-│   ├── capture.py           — захват экрана (QThread)
-│   └── sheets_sync.py       — синхронизация с Google Sheets
-├── db/
-│   └── database.py          — SQLite БД (сезоны, игроки, очки)
-├── ui/                      — интерфейс PyQt6
-├── scripts/
-│   ├── run.bat              — запуск приложения
-│   └── test.bat             — запуск тестов
-└── debug_crops/             — отладочные кропы OCR (если включено в настройках)
+main.py                  # Точка входа: OCR init → PyQt6 App → MainWindow
+config/
+  settings.json          # Настройки пользователя + ROI-профили + badge offsets
+  settings_manager.py    # load/save_settings, get/save_roi_for_resolution, get/save_badge_offsets
+core/
+  ocr.py                 # initialize_ocr() / extract_row_data() — RapidOCR + ddddocr
+  badge_detector.py      # find_badges() — cv2.matchTemplate + NMS
+  capture.py             # CaptureWorker(QObject) — скриншоты + прокрутка (pyautogui)
+  manual_processor.py    # process_images() — бейджи → OCR → дедубликация
+  sheets_sync.py         # Двухфазная синхронизация DB↔Sheets (export + import)
+db/
+  database.py            # SQLite: init_db, upsert_player, save_score, get_scores_for_season и др.
+ui/
+  main_window.py         # MainWindow + CollectWorker + Sheets-воркеры (Fetch/Write × Export/Import)
+  season_dialog.py       # Управление сезонами
+  manual_mode_dialog.py  # Ручной режим: загрузка скриншотов → OCR
+  calibration.py         # CalibrationCanvas + CalibrationDialog — рисование ROI-зон
+  badge_calibration.py   # BadgeOffsetCalibrationDialog — калибровка смещений бейджей
+  settings_dialog.py     # Диалог настроек (capture, DB, Google Sheets история)
+  sheets_preview_dialog.py        # Предпросмотр экспорта DB → Sheets
+  sheets_import_preview_dialog.py # Предпросмотр импорта Sheets → DB
+  style_utils.py         # Тёмные обёртки: mb_warning/critical/info/question, ask_text/ask_int
+  screen_snip.py         # Выбор области экрана для скриншота (ручной режим)
+  snip_proc.py           # Обработка снипов
+assets/
+  badges/                # Шаблоны бейджей (B1Gold, B2Silver, B3Bronze, B4Default) в 3× zoom
+debug_crops/             # Отладочные кропы OCR (генерируются при debug_save_crops=true)
+tests/                   # Pytest-тесты
+scripts/                 # run.bat, test.bat, syntax_check.py
+setup.bat                # Установка: создание venv + pip install
 ```
 
 ---
