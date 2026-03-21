@@ -264,3 +264,201 @@ def sync(
     """Read sheet, build diffs, and immediately write. No preview."""
     preview = prepare_sync(creds_path, sheet_id, season_id, worksheet_index)
     return execute_sync(preview)
+
+
+# ---------------------------------------------------------------------------
+# Reverse sync: Google Sheets → SQLite DB
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PlayerImportDiff:
+    sheet_name: str                       # имя из Col A таблицы
+    db_name: str | None                   # совпавшее имя в БД (None = новый)
+    is_new_player: bool
+    sheet_deltas: dict[int, int]          # {day_num: delta} как есть в таблице
+    sheet_snapshots: dict[int, int]       # {day_num: cumulative} после конвертации
+    db_snapshots: dict[int, int | None]   # {day_num: текущий снапшот в БД}
+    has_changes: bool
+
+
+@dataclass
+class ReversePreview:
+    diffs: list[PlayerImportDiff]
+    creds_path: str
+    sheet_id: str
+    worksheet_index: int
+    season_id: int
+
+    @property
+    def changed_count(self) -> int:
+        return sum(1 for d in self.diffs if d.has_changes)
+
+    @property
+    def new_players_count(self) -> int:
+        return sum(1 for d in self.diffs if d.is_new_player)
+
+
+@dataclass
+class ReverseResult:
+    imported: int = 0
+    created_players: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        lines = [f"Импортировано игроков: {self.imported}"]
+        if self.created_players:
+            lines.append("Создано новых игроков:\n  " + ", ".join(self.created_players))
+        if self.skipped:
+            lines.append("Пропущено (без изменений): " + str(len(self.skipped)))
+        return "\n".join(lines)
+
+
+def _deltas_to_snapshots(deltas: dict[int, int]) -> dict[int, int]:
+    """
+    Конвертирует дельты {day_num: delta} в накопительные снапшоты.
+    Нулевые дни включаются: снапшот = предыдущий + 0.
+    """
+    result = {}
+    running = 0
+    for day in range(1, 8):
+        running += deltas.get(day, 0)
+        result[day] = running
+    return result
+
+
+def prepare_reverse_sync(
+    creds_path: str,
+    sheet_id: str,
+    season_id: int,
+    worksheet_index: int = 0,
+) -> ReversePreview:
+    """
+    Читает таблицу и текущую БД, строит ReversePreview без записи в БД.
+    Для каждого игрока таблицы конвертирует дельты → снапшоты
+    и сравнивает с текущим состоянием БД.
+    """
+    from db.database import get_scores_for_season
+
+    client = authenticate(creds_path)
+    ws = client.open_by_key(sheet_id).get_worksheet(worksheet_index)
+    all_values = ws.get_all_values()
+
+    # Читаем игроков из таблицы (строки PLAYER_START_ROW+)
+    sheet_players: list[tuple[str, dict[int, int]]] = []
+    for row_idx, row in enumerate(all_values, start=1):
+        if row_idx < PLAYER_START_ROW:
+            continue
+        cell_name = row[NAME_COL - 1].strip() if row else ""
+        if not cell_name or cell_name == TOTAL_ROWS_HEADER:
+            continue
+        deltas: dict[int, int] = {}
+        for day_num in range(1, 8):
+            col_idx = DAY_COL_START - 1 + (day_num - 1)
+            raw = row[col_idx].strip() if col_idx < len(row) else ""
+            try:
+                deltas[day_num] = int(raw) if raw else 0
+            except ValueError:
+                deltas[day_num] = 0
+        sheet_players.append((cell_name, deltas))
+
+    db_data = get_scores_for_season(season_id)
+
+    diffs: list[PlayerImportDiff] = []
+
+    for sheet_name, deltas in sheet_players:
+        match = _find_best_match(sheet_name, db_data)
+        snapshots = _deltas_to_snapshots(deltas)
+
+        if match:
+            db_snaps = {d: match["day_snapshots"].get(d) for d in range(1, 8)}
+            has_changes = any(
+                snapshots.get(d) != db_snaps.get(d)
+                for d in range(1, 8)
+            )
+            diffs.append(PlayerImportDiff(
+                sheet_name=sheet_name,
+                db_name=match["name"],
+                is_new_player=False,
+                sheet_deltas=deltas,
+                sheet_snapshots=snapshots,
+                db_snapshots=db_snaps,
+                has_changes=has_changes,
+            ))
+        else:
+            db_snaps_empty = {d: None for d in range(1, 8)}
+            has_changes = any(v > 0 for v in snapshots.values())
+            diffs.append(PlayerImportDiff(
+                sheet_name=sheet_name,
+                db_name=None,
+                is_new_player=True,
+                sheet_deltas=deltas,
+                sheet_snapshots=snapshots,
+                db_snapshots=db_snaps_empty,
+                has_changes=has_changes,
+            ))
+
+    return ReversePreview(
+        diffs=diffs,
+        creds_path=creds_path,
+        sheet_id=sheet_id,
+        worksheet_index=worksheet_index,
+        season_id=season_id,
+    )
+
+
+def execute_reverse_sync(preview: ReversePreview) -> ReverseResult:
+    """
+    Пишет снапшоты из ReversePreview в SQLite БД.
+    Новые игроки создаются автоматически.
+    """
+    from db.database import get_connection
+
+    result = ReverseResult()
+
+    conn = get_connection()
+    c = conn.cursor()
+
+    for diff in preview.diffs:
+        if not diff.has_changes:
+            result.skipped.append(diff.sheet_name)
+            continue
+
+        name = diff.db_name if diff.db_name else diff.sheet_name
+
+        # Inline upsert player — одно соединение, иначе SQLite "database is locked"
+        c.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (name,))
+        row = c.execute("SELECT id FROM players WHERE name=?", (name,)).fetchone()
+        player_id = row["id"]
+
+        if diff.is_new_player:
+            result.created_players.append(name)
+
+        max_snapshot = 0
+        for day_num in range(1, 8):
+            snap = diff.sheet_snapshots.get(day_num, 0)
+            c.execute(
+                """INSERT INTO day_scores (season_id, player_id, day_number, total_score)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(season_id, player_id, day_number) DO UPDATE SET
+                       total_score=excluded.total_score,
+                       recorded_at=datetime('now')
+                """,
+                (preview.season_id, player_id, day_num, snap)
+            )
+            if snap > max_snapshot:
+                max_snapshot = snap
+
+        c.execute(
+            """INSERT INTO scores (season_id, player_id, total_score, position)
+               VALUES (?,?,?,NULL)
+               ON CONFLICT(season_id, player_id) DO UPDATE SET
+                   total_score=excluded.total_score,
+                   recorded_at=datetime('now')
+            """,
+            (preview.season_id, player_id, max_snapshot)
+        )
+        result.imported += 1
+
+    conn.commit()
+    conn.close()
+    return result

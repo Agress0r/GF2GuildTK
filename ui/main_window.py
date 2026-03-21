@@ -73,6 +73,44 @@ class _SheetsWriteWorker(QThread):
             self.error.emit(str(e))
 
 
+class _SheetsImportFetchWorker(QThread):
+    """Phase 1 reverse: reads sheet, builds ReversePreview — no DB writes."""
+    finished = pyqtSignal(object)   # ReversePreview
+    error    = pyqtSignal(str)
+
+    def __init__(self, creds_path: str, sheet_id: str, season_id: int):
+        super().__init__()
+        self.creds_path = creds_path
+        self.sheet_id   = sheet_id
+        self.season_id  = season_id
+
+    def run(self):
+        try:
+            from core.sheets_sync import prepare_reverse_sync
+            preview = prepare_reverse_sync(self.creds_path, self.sheet_id, self.season_id)
+            self.finished.emit(preview)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class _SheetsImportWriteWorker(QThread):
+    """Phase 2 reverse: writes snapshots from ReversePreview to SQLite."""
+    finished = pyqtSignal(object)   # ReverseResult
+    error    = pyqtSignal(str)
+
+    def __init__(self, preview):
+        super().__init__()
+        self._preview = preview
+
+    def run(self):
+        try:
+            from core.sheets_sync import execute_reverse_sync
+            result = execute_reverse_sync(self._preview)
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class CollectWorker(QObject):
     player_found = pyqtSignal(int, str, int)
     log_message  = pyqtSignal(str)
@@ -224,6 +262,17 @@ QPushButton#sheets_btn {
     text-align: center;
 }
 QPushButton#sheets_btn:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #0e3a6a,stop:1 #1a4a2a); }
+QPushButton#import_btn {
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0a2a0a, stop:1 #0a2a3a);
+    color: #80d080;
+    border: 1px solid #2a6a3a;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: bold;
+    text-align: center;
+}
+QPushButton#import_btn:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #0d3a0d,stop:1 #0a3a5a); }
 QPushButton#seasons_btn {
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #2a1a4a, stop:1 #1a2a4a);
     color: #c090f0;
@@ -446,6 +495,13 @@ class MainWindow(QMainWindow):
         sheets_btn.setObjectName("sheets_btn")
         sheets_btn.clicked.connect(self._export_sheets)
         v.addWidget(sheets_btn)
+        
+        v.addSpacing(8)
+
+        import_btn = QPushButton("📥  Импорт из\nGoogle Таблицы")
+        import_btn.setObjectName("import_btn")
+        import_btn.clicked.connect(self._import_sheets)
+        v.addWidget(import_btn)
 
         v.addSpacing(8)
 
@@ -1098,6 +1154,64 @@ class MainWindow(QMainWindow):
         self.status_bar.setText("Ошибка синхронизации Google Sheets.")
         self._log(f"[Ошибка] Google Sheets: {message}")
         mb_critical(self, "Google Sheets — ошибка", message)
+
+    def _import_sheets(self):
+        from config.settings_manager import load_settings
+        settings = load_settings()
+        sheet_id = settings.get("google_sheets_id", "").strip()
+        creds_path = settings.get("google_credentials_path", "").strip()
+
+        if not sheet_id:
+            mb_warning(self, "Импорт из Google Sheets",
+                       "Таблица не выбрана.\nОткройте Настройки и добавьте таблицу.")
+            return
+        if not creds_path:
+            mb_warning(self, "Импорт из Google Sheets",
+                       "Не указан путь к credentials.json.\nОткройте Настройки.")
+            return
+        if self._current_season_id is None:
+            mb_warning(self, "Импорт из Google Sheets", "Выберите сезон для импорта.")
+            return
+
+        if not mb_question(
+            self, "Импорт из Google Sheets",
+            "Данные из Google Sheets будут записаны в локальную БД.\n"
+            "Существующие данные за те же дни будут перезаписаны.\n\n"
+            "Продолжить?"
+        ):
+            return
+
+        self._import_fetch = _SheetsImportFetchWorker(
+            creds_path, sheet_id, self._current_season_id
+        )
+        self._import_fetch.finished.connect(self._on_import_preview_ready)
+        self._import_fetch.error.connect(self._on_import_error)
+        self._import_fetch.start()
+        self.status_bar.setText("Загрузка данных из Google Sheets для импорта…")
+
+    def _on_import_preview_ready(self, preview):
+        self.status_bar.setText("Данные загружены. Откройте предпросмотр импорта.")
+        from ui.sheets_import_preview_dialog import SheetsImportPreviewDialog
+        dlg = SheetsImportPreviewDialog(preview, parent=self)
+        if dlg.exec() != SheetsImportPreviewDialog.DialogCode.Accepted:
+            self.status_bar.setText("Импорт отменён.")
+            return
+        self._import_write = _SheetsImportWriteWorker(preview)
+        self._import_write.finished.connect(self._on_import_done)
+        self._import_write.error.connect(self._on_import_error)
+        self._import_write.start()
+        self.status_bar.setText("Запись данных в БД…")
+
+    def _on_import_done(self, result):
+        self.status_bar.setText(f"Импорт завершён: {result.imported} игроков.")
+        self._log(f"Импорт из Google Sheets завершён. {result.summary()}")
+        mb_info(self, "Импорт завершён", result.summary())
+        self._load_table()
+
+    def _on_import_error(self, message: str):
+        self.status_bar.setText("Ошибка импорта из Google Sheets.")
+        self._log(f"[Ошибка] Импорт из Google Sheets: {message}")
+        mb_critical(self, "Импорт — ошибка", message)
 
     # ---------------------------------------------------------------- #
     #  Log                                                               #
