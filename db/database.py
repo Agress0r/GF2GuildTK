@@ -253,12 +253,18 @@ def save_day_score(season_id: int, player_id: int, day_number: int, total_score:
         """,
         (season_id, player_id, day_number, total_score)
     )
-    # Also update main scores table to keep total_score in sync with latest day
+    # Update main scores table with the MAX snapshot across all days,
+    # so editing an earlier day never overwrites a later day's value.
+    row = c.execute(
+        "SELECT MAX(total_score) AS max_snap FROM day_scores WHERE season_id=? AND player_id=?",
+        (season_id, player_id)
+    ).fetchone()
+    best_snap = row["max_snap"] if row and row["max_snap"] is not None else total_score
     c.execute(
         """UPDATE scores SET total_score=?, recorded_at=datetime('now')
            WHERE season_id=? AND player_id=?
         """,
-        (total_score, season_id, player_id)
+        (best_snap, season_id, player_id)
     )
     conn.commit()
     conn.close()
