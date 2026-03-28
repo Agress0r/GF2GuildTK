@@ -22,38 +22,53 @@ try:
 except ImportError:
     _CV2_AVAILABLE = False
 
-# Badge templates are saved at 3× original resolution
-TEMPLATE_SCALE = 1 / 3.0
-
-TEMPLATES_DIR = Path("assets/badges")
-TEMPLATE_NAMES = ["B1Gold", "B2Silver", "B3Bronze", "B4Default"]
+# Per-mode configuration for badge templates
+MODE_CONFIG = {
+    "gs": {
+        "templates_dir": Path("assets/badges"),
+        "template_names": ["B1Gold", "B2Silver", "B3Bronze", "B4Default"],
+        "template_scale": 1 / 3.0,  # saved at 3× zoom → scale down
+    },
+    "fc": {
+        "templates_dir": Path("assets/gs2_badges"),
+        "template_names": ["1", "2", "3", "_avg_single", "_avg_double"],
+        "template_scale": 1.0,  # native size — already at screen scale
+    },
+}
 
 
 # ------------------------------------------------------------------ #
 #  Template loading                                                    #
 # ------------------------------------------------------------------ #
 
-def load_templates() -> list[np.ndarray]:
+def load_templates(mode: str = "gs") -> list[np.ndarray]:
     """
-    Load badge templates from debug_crops/, scale them down to original size.
+    Load badge templates for the given mode, apply per-mode scaling.
     Returns list of BGR numpy arrays ready for cv2.matchTemplate.
     """
     if not _CV2_AVAILABLE:
         return []
 
+    cfg = MODE_CONFIG.get(mode, MODE_CONFIG["gs"])
+    templates_dir = cfg["templates_dir"]
+    template_names = cfg["template_names"]
+    template_scale = cfg["template_scale"]
+
     templates = []
-    for name in TEMPLATE_NAMES:
-        path = TEMPLATES_DIR / f"{name}.png"
+    for name in template_names:
+        path = templates_dir / f"{name}.png"
         if not path.exists():
             continue
         img = cv2.imread(str(path))
         if img is None:
             continue
         h, w = img.shape[:2]
-        new_w = max(1, int(w * TEMPLATE_SCALE))
-        new_h = max(1, int(h * TEMPLATE_SCALE))
-        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        templates.append(resized)
+        new_w = max(1, int(w * template_scale))
+        new_h = max(1, int(h * template_scale))
+        if new_w != w or new_h != h:
+            interp = cv2.INTER_AREA if template_scale < 1 else cv2.INTER_LINEAR
+            img = cv2.resize(img, (new_w, new_h), interpolation=interp)
+        templates.append(img)
 
     return templates
 

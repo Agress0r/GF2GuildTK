@@ -251,6 +251,16 @@ QPushButton#start_btn {
     font-weight: bold;
 }
 QPushButton#start_btn:hover   { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #206030,stop:1 #0a4a70); }
+QPushButton#fc_btn {
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #3a2a1a, stop:1 #1a2a4a);
+    color: #f0c060;
+    border: 1px solid #6a4a2a;
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 14px;
+    font-weight: bold;
+}
+QPushButton#fc_btn:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #4a3a2a,stop:1 #2a3a5a); }
 QPushButton#sheets_btn {
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0a2a4a, stop:1 #1a3a2a);
     color: #60c8f0;
@@ -484,10 +494,15 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self._stop_collection)
         v.addWidget(self.stop_btn)
 
-        manual_btn = QPushButton("🖼  Обработка данных")
+        manual_btn = QPushButton("⚔️  Обработка данных\nGS")
         manual_btn.setObjectName("start_btn")
         manual_btn.clicked.connect(self._open_manual_mode)
         v.addWidget(manual_btn)
+
+        fc_btn = QPushButton("🎲  Обработка данных\nFC")
+        fc_btn.setObjectName("fc_btn")
+        fc_btn.clicked.connect(self._open_fc_mode)
+        v.addWidget(fc_btn)
 
         v.addSpacing(8)
 
@@ -620,6 +635,16 @@ class MainWindow(QMainWindow):
                        "Сначала выберите или создайте сезон.")
             return
         dlg = ManualModeDialog(self._current_season_id, self._current_season_name, self)
+        dlg.finished.connect(lambda _: self._load_table())
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
+
+    def _open_fc_mode(self):
+        if self._current_season_id is None:
+            mb_warning(self, "Сезон не выбран",
+                       "Сначала выберите или создайте сезон.")
+            return
+        dlg = ManualModeDialog(self._current_season_id, self._current_season_name, self, mode="fc")
         dlg.finished.connect(lambda _: self._load_table())
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.show()

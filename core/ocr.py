@@ -176,7 +176,7 @@ def _read_number(img: Image.Image, label: str = "", log=None) -> int | None:
             buf = io.BytesIO()
             _preprocess(img).save(buf, format="PNG")
             raw = ocr.classification(buf.getvalue())
-            digits = re.sub(r"\D", "", str(raw))
+            digits = _to_digits(str(raw))
             _log(log, f"    [dddd {label}] raw={raw!r}  digits={digits!r}")
             if digits:
                 return int(digits)
@@ -192,12 +192,21 @@ def _read_number(img: Image.Image, label: str = "", log=None) -> int | None:
             return None
         result, _ = ocr(_preprocess_np(img))
         texts = [r[1] for r in result] if result else []
-        joined = re.sub(r"\D", "", "".join(texts))
+        joined = _to_digits("".join(texts))
         _log(log, f"    [rapid {label}] raw={texts!r}  digits={joined!r}")
         return int(joined) if joined else None
     except Exception as e:
         _log(log, f"    [rapid {label}] ❌ {e}")
         return None
+
+
+def _to_digits(s: str) -> str:
+    """Fix common OCR misreads before stripping non-digits."""
+    s = s.replace("O", "0").replace("o", "0")
+    s = s.replace("l", "1").replace("I", "1")
+    s = s.replace("S", "5").replace("s", "5")
+    s = s.replace("B", "8")
+    return re.sub(r"\D", "", s)
 
 
 # ------------------------------------------------------------------ #

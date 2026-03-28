@@ -111,17 +111,21 @@ class _ProcessWorker(QObject):
     log_message  = pyqtSignal(str)
     finished     = pyqtSignal()
 
-    def __init__(self, images: list[Image.Image], offsets: dict):
+    def __init__(self, images: list[Image.Image], offsets: dict, mode: str = "gs"):
         super().__init__()
         self.images  = images
         self.offsets = offsets
+        self._mode   = mode
 
     def run(self):
         from core.manual_processor import process_images
+        threshold = 0.45 if self._mode == "fc" else 0.55
         results = process_images(
             self.images,
             self.offsets,
+            threshold=threshold,
             log=self.log_message.emit,
+            mode=self._mode,
         )
         for name, score in results:
             self.result_row.emit(name, score)
@@ -133,12 +137,14 @@ class _ProcessWorker(QObject):
 # ------------------------------------------------------------------ #
 
 class ManualModeDialog(QDialog):
-    def __init__(self, season_id: int, season_name: str, parent=None):
+    def __init__(self, season_id: int, season_name: str, parent=None, mode: str = "gs"):
         super().__init__(parent)
         self.season_id   = season_id
         self.season_name = season_name
+        self._mode       = mode
 
-        self.setWindowTitle(f"Ручной режим — {season_name}")
+        mode_label = "GS" if mode == "gs" else "FC"
+        self.setWindowTitle(f"Ручной режим ({mode_label}) — {season_name}")
         self.setStyleSheet(STYLESHEET)
         self.setMinimumSize(1050, 680)
 
@@ -486,7 +492,7 @@ class ManualModeDialog(QDialog):
             mb_warning(self, "Нет изображений", "Загрузите хотя бы один скриншот.")
             return
 
-        offsets = get_badge_offsets()
+        offsets = get_badge_offsets(mode=self._mode)
         if not offsets:
             if mb_question(self, "Нет калибровки",
                            "Калибровка смещений не настроена.\nОткрыть калибровку?"):
@@ -501,7 +507,7 @@ class ManualModeDialog(QDialog):
         self.progress.setVisible(True)
         self.status_label.setText("Обработка…")
 
-        self._worker = _ProcessWorker(list(self._images), offsets)
+        self._worker = _ProcessWorker(list(self._images), offsets, mode=self._mode)
         self._thread = QThread()
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -575,7 +581,7 @@ class ManualModeDialog(QDialog):
 
     def _open_calibration(self):
         from ui.badge_calibration import BadgeOffsetCalibrationDialog
-        dlg = BadgeOffsetCalibrationDialog(self)
+        dlg = BadgeOffsetCalibrationDialog(self, mode=self._mode)
         dlg.exec()
 
     # ---------------------------------------------------------------- #

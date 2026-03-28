@@ -214,9 +214,11 @@ class _CalibCanvas(QWidget):
 class BadgeOffsetCalibrationDialog(QDialog):
     calibration_saved = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, mode: str = "gs"):
         super().__init__(parent)
-        self.setWindowTitle("Калибровка смещений бейджа — Guild Tracker")
+        self._mode = mode
+        mode_label = "GS" if mode == "gs" else "FC"
+        self.setWindowTitle(f"Калибровка смещений бейджа ({mode_label}) — Guild Tracker")
         self.setStyleSheet(STYLESHEET)
         self.setMinimumSize(1000, 700)
 
@@ -471,16 +473,17 @@ class BadgeOffsetCalibrationDialog(QDialog):
         if offsets is None:
             return
 
-        from core.badge_detector import load_templates, find_badges
-        templates = load_templates()
+        from core.badge_detector import load_templates, find_badges, MODE_CONFIG
+        templates = load_templates(mode=self._mode)
         if not templates:
+            tdir = MODE_CONFIG.get(self._mode, {}).get("templates_dir", "assets/badges")
             mb_warning(self, "Нет шаблонов",
-                "Шаблоны не найдены в assets/badges/.\n"
-                "Убедитесь, что файлы B1Gold,B2Silver,B3Bronze,B4Default существуют.")
+                f"Шаблоны не найдены в {tdir}/.")
             return
 
+        threshold = 0.45 if self._mode == "fc" else 0.75
         badges = find_badges(self._pil_img, templates,
-                             threshold=0.75, offsets=offsets)
+                             threshold=threshold, offsets=offsets)
         self.canvas.preview_badges  = badges
         self.canvas.preview_offsets = offsets
         self.canvas.update()
@@ -503,16 +506,34 @@ class BadgeOffsetCalibrationDialog(QDialog):
         name_rect  = self._rects["name"]
         score_rect = self._rects["score"]
 
+        # Use actual matchTemplate position instead of user-drawn rectangle
+        # so that offsets match what find_badges returns during processing.
+        ref_x, ref_y = badge_rect.x(), badge_rect.y()
+
+        if self._pil_img:
+            from core.badge_detector import load_templates, find_badges
+            templates = load_templates(mode=self._mode)
+            if templates:
+                # Detect without offset filtering — we just need raw badge positions
+                detect_threshold = 0.45 if self._mode == "fc" else 0.55
+                detected = find_badges(self._pil_img, templates, threshold=detect_threshold)
+                if detected:
+                    # Find the detected badge closest to where the user drew
+                    cx = badge_rect.x() + badge_rect.width() // 2
+                    cy = badge_rect.y() + badge_rect.height() // 2
+                    best = min(detected, key=lambda b: (b[0] + b[2]//2 - cx)**2 + (b[1] + b[3]//2 - cy)**2)
+                    ref_x, ref_y = best[0], best[1]
+
         return {
             "name": {
-                "dx": name_rect.x()  - badge_rect.x(),
-                "dy": name_rect.y()  - badge_rect.y(),
+                "dx": name_rect.x()  - ref_x,
+                "dy": name_rect.y()  - ref_y,
                 "w":  name_rect.width(),
                 "h":  name_rect.height(),
             },
             "score": {
-                "dx": score_rect.x()  - badge_rect.x(),
-                "dy": score_rect.y()  - badge_rect.y(),
+                "dx": score_rect.x()  - ref_x,
+                "dy": score_rect.y()  - ref_y,
                 "w":  score_rect.width(),
                 "h":  score_rect.height(),
             },
@@ -522,7 +543,7 @@ class BadgeOffsetCalibrationDialog(QDialog):
         offsets = self._compute_offsets()
         if offsets is None:
             return
-        save_badge_offsets(offsets)
+        save_badge_offsets(offsets, mode=self._mode)
         mb_info(
             self, "Сохранено",
             f"Калибровка сохранена!\n\n"

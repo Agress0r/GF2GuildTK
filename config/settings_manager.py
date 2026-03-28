@@ -67,13 +67,15 @@ def save_roi_for_resolution(width: int, height: int, roi: dict):
     save_settings(settings)
 
 
-def get_badge_offsets() -> dict | None:
+def get_badge_offsets(mode: str = "gs") -> dict | None:
     """Return saved badge offset calibration or None if not calibrated."""
-    return load_settings().get("badge_offsets")
+    key = "badge_offsets" if mode == "gs" else f"{mode}_badge_offsets"
+    return load_settings().get(key)
 
 
-def save_badge_offsets(offsets: dict):
+def save_badge_offsets(offsets: dict, mode: str = "gs"):
     """Save badge offset calibration (name/score offsets relative to badge top-left)."""
+    key = "badge_offsets" if mode == "gs" else f"{mode}_badge_offsets"
     settings = load_settings()
-    settings["badge_offsets"] = offsets
+    settings[key] = offsets
     save_settings(settings)
