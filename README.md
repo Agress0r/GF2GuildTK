@@ -9,16 +9,16 @@
 ## Требования
 
 - **Windows 10 / 11**
-- **Python 3.12 или новее** ([скачать](https://www.python.org/downloads/))
+- **Только Python 3.12.x** ([скачать Python 3.12](https://www.python.org/downloads/release/python-31210/))
 - Интернет-соединение для первоначальной установки
 
 ---
 
 ## Установка
 
-### 1. Скачайте Python 3.12+
+### 1. Скачайте Python 3.12.x
 
-Перейдите на [python.org/downloads](https://www.python.org/downloads/) и установите Python.
+Установите именно Python 3.12.x. Python 3.13, 3.11, 3.10 и другие версии не подходят.
 Прямая ссылка на [Python 3.12](https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe)
 
 > При установке **обязательно** отметьте галочку **"Add Python to PATH"**
@@ -42,11 +42,12 @@ setup.bat
 - Создаст виртуальное окружение `GF2TTK\`
 - Установит все зависимости
 - Прогреет OCR-модели (первый запуск будет быстрее)
+- Если Python 3.12.x не найден, предложит скачать официальный установщик Python 3.12 для Windows с python.org
 
 ### 4. Запустите приложение
 
 ```
-scripts\run.bat
+run.bat
 ```
 
 ---
@@ -132,8 +133,10 @@ assets/
   badges/                # Шаблоны бейджей (B1Gold, B2Silver, B3Bronze, B4Default) в 3× zoom
 debug_crops/             # Отладочные кропы OCR (генерируются при debug_save_crops=true)
 tests/                   # Pytest-тесты
-scripts/                 # run.bat, test.bat, syntax_check.py
-setup.bat                # Установка: создание venv + pip install
+scripts/                 # test.bat, syntax_check.py, legacy run.bat
+setup.bat                # CMD-запускатель установки
+setup.ps1                # Основная логика установки: Python 3.12.x, venv, pip, smoke-test
+run.bat                  # Создаётся установщиком для запуска приложения
 ```
 
 ---
