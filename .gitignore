@@ -52,3 +52,30 @@ desktop.ini
 # Temporary files
 *.tmp
 *.log
+captures/
+backups/
+drafts/
+.venv*/
+dist/
+build/
+GuildTracker.spec
+settings.json
+.archive/
+
+# Local research, audit records and editor tooling (not release sources)
+/Example/
+/docs/audit-*.md
+/docs/improvements.md
+/scripts/syntax_check.py
+*.code-workspace
+
+# Release artifacts and user database sidecars
+/release/
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+.env
+*.pem
+*.key

@@ -1,34 +1,27 @@
 """Main application window."""
 
 from __future__ import annotations
+from ui.controls import AppSpinBox, ui_scale
 import os
-import time
-import pyautogui
-from datetime import date as date_type
-from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-    QTextEdit, QSplitter, QHeaderView, QAbstractItemView,
-    QProgressBar, QMenu,
-    QDialog, QRadioButton, QDialogButtonBox, QSpinBox,
-)
-from ui.style_utils import mb_warning, mb_critical, mb_info, mb_question, ask_text, ask_int
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QColor, QFont, QIcon, QAction, QPixmap
+import sys
+from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QTextEdit, QSplitter, QHeaderView, QAbstractItemView, QProgressBar, QMenu, QLineEdit, QDialog, QRadioButton, QDialogButtonBox
+from ui.style_utils import mb_warning, mb_critical, mb_info, mb_question, ask_text
+from ui.theme import DIALOG_STYLE, style_for, theme_color
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QAction, QColor, QKeySequence, QPixmap, QShortcut
 
-import pyautogui
 from db.database import (
-    init_db, get_scores_for_season, save_score, get_season,
+    init_db, get_scores_for_season,
     rename_player, set_player_locked, get_player_lock_state,
-    save_day_score, get_all_player_names_with_lock, get_last_active_season,
+    save_day_score, get_last_active_season,
     add_player_to_season, remove_player_from_season
 )
-from config.settings_manager import load_settings, get_roi_for_resolution
-from ui.calibration import CalibrationDialog
 from ui.settings_dialog import SettingsDialog
 from ui.season_dialog import SeasonDialog
 from ui.manual_mode_dialog import ManualModeDialog
 from ui.badge_calibration import BadgeOffsetCalibrationDialog
+from ui.history_dialog import HistoryDialog
+from db.backups import latest_import, restore_latest_import
 
 
 # ------------------------------------------------------------------ #
@@ -40,16 +33,18 @@ class _SheetsFetchWorker(QThread):
     finished = pyqtSignal(object)   # SyncPreview
     error    = pyqtSignal(str)
 
-    def __init__(self, creds_path: str, sheet_id: str, season_id: int):
+    def __init__(self, creds_path: str, sheet_id: str, season_id: int, worksheet_id: int):
         super().__init__()
         self.creds_path = creds_path
         self.sheet_id   = sheet_id
         self.season_id  = season_id
+        self.worksheet_id = worksheet_id
 
     def run(self):
         try:
             from core.sheets_sync import prepare_sync
-            preview = prepare_sync(self.creds_path, self.sheet_id, self.season_id)
+            preview = prepare_sync(self.creds_path, self.sheet_id, self.season_id,
+                                   worksheet_id=self.worksheet_id)
             self.finished.emit(preview)
         except Exception as e:
             self.error.emit(str(e))
@@ -78,19 +73,46 @@ class _SheetsImportFetchWorker(QThread):
     finished = pyqtSignal(object)   # ReversePreview
     error    = pyqtSignal(str)
 
-    def __init__(self, creds_path: str, sheet_id: str, season_id: int):
+    def __init__(self, creds_path: str, sheet_id: str, season_id: int,
+                 worksheet_id: int):
         super().__init__()
         self.creds_path = creds_path
         self.sheet_id   = sheet_id
         self.season_id  = season_id
+        self.worksheet_id = worksheet_id
 
     def run(self):
         try:
             from core.sheets_sync import prepare_reverse_sync
-            preview = prepare_reverse_sync(self.creds_path, self.sheet_id, self.season_id)
+            preview = prepare_reverse_sync(
+                self.creds_path, self.sheet_id, self.season_id,
+                worksheet_id=self.worksheet_id,
+            )
             self.finished.emit(preview)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class _SheetsImportTabsWorker(QThread):
+    """Load the current visible worksheet list without blocking the UI."""
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, creds_path: str, sheet_id: str, season_id: int):
+        super().__init__()
+        self.creds_path = creds_path
+        self.sheet_id = sheet_id
+        self.season_id = season_id
+
+    def run(self):
+        try:
+            from core.sheets_sync import list_import_worksheets
+            worksheets = list_import_worksheets(self.creds_path, self.sheet_id)
+            if not worksheets:
+                raise ValueError("В таблице нет видимых листов для импорта.")
+            self.finished.emit(worksheets)
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
 class _SheetsImportWriteWorker(QThread):
@@ -111,254 +133,42 @@ class _SheetsImportWriteWorker(QThread):
             self.error.emit(str(e))
 
 
-class CollectWorker(QObject):
-    player_found = pyqtSignal(int, str, int)
-    log_message  = pyqtSignal(str)
-    finished     = pyqtSignal(int)
-    error        = pyqtSignal(str)
-
-    def __init__(self, roi, settings, season_id, day_number: int = 1):
-        super().__init__()
-        self.roi        = roi
-        self.settings   = settings
-        self.season_id  = season_id
-        self.day_number = day_number
-        self._running   = False
-
-    def stop(self):
-        self._running = False
-
-    def run(self):
-        try:
-            from core.ocr import extract_row_data
-            from core.capture import scroll_down
-        except ImportError as e:
-            self.error.emit(f"Ошибка импорта: {e}")
-            return
-
-        self._running = True
-        screen_w, screen_h = pyautogui.size()
-        scroll_pause  = self.settings.get("scroll_pause", 1.2)
-        scroll_amount = self.settings.get("scroll_amount", 3)
-        ticks_per_row = self.settings.get("ticks_per_row", 5)
-        save_debug    = self.settings.get("debug_save_crops", False)
-
-        collected: dict[int, tuple[str, int]] = {}
-        last_max = -1
-        stall    = 0
-        MAX_STALL = 3
-        shot_idx  = 0
-
-        # Pre-fetch player list once for batch fuzzy matching
-        existing_players = get_all_player_names_with_lock()
-
-        self.log_message.emit("▶ Начинаю сбор данных…")
-        self.log_message.emit(f"  Экран: {screen_w}x{screen_h} | "
-                              f"scroll: {scroll_amount} строк × {ticks_per_row} тиков | "
-                              f"пауза: {scroll_pause}s | День {self.day_number}")
-        self.log_message.emit(f"  Строк в ROI: {len(self.roi.get('rows', []))}")
-
-        while self._running:
-            try:
-                screenshot = pyautogui.screenshot()
-                rows = extract_row_data(
-                    screenshot, self.roi, screen_w, screen_h,
-                    log=self.log_message.emit,
-                    save_debug=save_debug,
-                    screenshot_index=shot_idx,
-                )
-                shot_idx += 1
-            except Exception as e:
-                self.error.emit(str(e))
-                break
-
-            new_this_frame = 0
-            for pos, name, score in rows:
-                if pos not in collected:
-                    collected[pos] = (name, score)
-                    new_this_frame += 1
-                    save_score(self.season_id, name, score, pos,
-                               day_number=self.day_number,
-                               existing_players=existing_players)
-                    self.player_found.emit(pos, name, score)
-
-            if new_this_frame == 0 and rows:
-                self.log_message.emit(f"  (все {len(rows)} игроков уже в базе — дубли)")
-
-            cur_max = max(collected.keys()) if collected else 0
-            if cur_max == last_max:
-                stall += 1
-                self.log_message.emit(f"  Нет новых игроков ({stall}/{MAX_STALL})…")
-                if stall >= MAX_STALL:
-                    self.log_message.emit("✅ Таблица закончилась.")
-                    break
-            else:
-                stall    = 0
-                last_max = cur_max
-
-            scroll_down(scroll_amount, ticks_per_row)
-            time.sleep(scroll_pause)
-
-        self._running = False
-        self.finished.emit(len(collected))
-
-
 # ------------------------------------------------------------------ #
 #  Stylesheet                                                          #
 # ------------------------------------------------------------------ #
 
-STYLESHEET = """
-QMainWindow, QWidget#central {
-    background: #0a0e17;
-    color: #d0ddf0;
-    font-family: 'Segoe UI', 'Malgun Gothic', sans-serif;
-}
-/* Top bar */
-QWidget#topbar { background: #0d1220; border-bottom: 1px solid #1e2a40; }
-QLabel#app_title {
-    font-size: 22px;
-    font-weight: bold;
-    color: #f0c040;
-    letter-spacing: 2px;
-    padding: 0 8px;
-}
-QLabel#season_label {
-    font-size: 13px;
-    color: #6a8aaf;
-    padding: 0 8px;
-}
-/* Sidebar */
-QWidget#sidebar { background: #0d1220; border-right: 1px solid #1e2a40; min-width: 200px; max-width:220px; }
-/* Action buttons */
-QPushButton.action {
-    background: #111c30;
-    color: #a8c0e0;
-    border: 1px solid #1e2a45;
-    border-radius: 8px;
-    padding: 10px 14px;
-    font-size: 13px;
-    text-align: left;
-}
-QPushButton.action:hover  { background: #1a2a45; color:#ffffff; }
-QPushButton.action:pressed{ background: #2a3a5a; }
-QPushButton#start_btn {
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #1a4a2a, stop:1 #0a3a5a);
-    color: #80ff80;
-    border: 1px solid #2a6a3a;
-    border-radius: 8px;
-    padding: 12px 14px;
-    font-size: 14px;
-    font-weight: bold;
-}
-QPushButton#start_btn:hover   { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #206030,stop:1 #0a4a70); }
-QPushButton#sheets_btn {
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0a2a4a, stop:1 #1a3a2a);
-    color: #60c8f0;
-    border: 1px solid #2a6a8a;
-    border-radius: 8px;
-    padding: 10px 14px;
-    font-size: 13px;
-    font-weight: bold;
-    text-align: center;
-}
-QPushButton#sheets_btn:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #0e3a6a,stop:1 #1a4a2a); }
-QPushButton#import_btn {
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0a2a0a, stop:1 #0a2a3a);
-    color: #80d080;
-    border: 1px solid #2a6a3a;
-    border-radius: 8px;
-    padding: 10px 14px;
-    font-size: 13px;
-    font-weight: bold;
-    text-align: center;
-}
-QPushButton#import_btn:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #0d3a0d,stop:1 #0a3a5a); }
-QPushButton#seasons_btn {
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #2a1a4a, stop:1 #1a2a4a);
-    color: #c090f0;
-    border: 1px solid #5a3a8a;
-    border-radius: 8px;
-    padding: 12px 14px;
-    font-size: 14px;
-    font-weight: bold;
-}
-QPushButton#seasons_btn:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #3a2a5a,stop:1 #2a3a5a); }
-QPushButton#stop_btn {
-    background: #3a1a1a;
-    color: #ff8080;
-    border: 1px solid #6a2a2a;
-    border-radius: 8px;
-    padding: 12px 14px;
-    font-size: 14px;
-    font-weight: bold;
-}
-QPushButton#stop_btn:hover { background: #4a2020; }
-/* Status bar area */
-QLabel#status_bar {
-    background: #0d1220;
-    border-top: 1px solid #1e2a40;
-    color: #5a7a9a;
-    font-size: 12px;
-    padding: 4px 12px;
-}
-/* Table */
-QTableWidget {
-    background: #0d1625;
-    color: #c0d4f0;
-    gridline-color: #162030;
-    border: none;
-    font-size: 15px;
-    font-family: 'Comic Sans MS', 'Segoe UI', sans-serif;
-    selection-background-color: #1a3050;
-}
-QHeaderView::section {
-    background: #0d1a2a;
-    color: #7090b0;
-    border: none;
-    border-bottom: 1px solid #1e2a40;
-    padding: 6px 10px;
-    font-size: 12px;
-    font-weight: bold;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-}
-QTableWidget::item { padding: 4px 10px; border-bottom: 1px solid #111a27; }
-QTableWidget::item:selected { background: #1a3050; color: #e0f0ff; }
-/* Log */
-QTextEdit#log {
-    background: #080e18;
-    color: #4a8a4a;
-    border: none;
-    font-family: 'Consolas', 'Courier New', monospace;
-    font-size: 12px;
-    padding: 8px;
-}
-/* Progress */
-QProgressBar {
-    background: #111a28;
-    border: 1px solid #1e2a40;
-    border-radius: 4px;
-    height: 6px;
-    text-align: center;
-}
-QProgressBar::chunk { background: #2a7a4a; border-radius: 4px; }
-/* Countdown */
-QLabel#countdown {
-    font-size: 48px;
-    font-weight: bold;
-    color: #f0c040;
-    qproperty-alignment: AlignCenter;
-}
-/* Context menu */
-QMenu {
-    background: #1a2435;
-    color: #c8d8f0;
-    border: 1px solid #2a3a5a;
-    border-radius: 4px;
-    font-size: 13px;
-}
-QMenu::item { padding: 6px 20px; }
-QMenu::item:selected { background: #2a3a5a; }
+STYLESHEET = DIALOG_STYLE + """
+QMainWindow, QWidget#central { background: #0b0c0e; color: #ccc8bc; font-family: 'Segoe UI', sans-serif; }
+QWidget#topbar { background: #0f1014; border-bottom: 1px solid #2a2a2b; }
+QLabel#app_title { color: #e8b84b; font-size: 18px; font-weight: 700; letter-spacing: 2px; }
+QLabel#season_label { color: #8c8a7e; font-size: 12px; padding-left: 12px; }
+QLabel#metric { color: #ece8dc; font-size: 13px; font-weight: 600; padding: 0 12px; }
+QWidget#sidebar { background: #0f1014; border-right: 1px solid #22242c;  }
+QLabel#nav_label { color: #777267; font-size: 10px; font-weight: 700; letter-spacing: 2px; padding: 17px 10px 5px 10px; border-top: 1px solid #22242c; }
+QPushButton { background: #17181d; color: #ccc8bc; border: 1px solid #353840; border-radius: 3px; padding: 9px 12px; font-size: 12px; text-align: left; }
+QPushButton:hover { background: #242329; color: #ece8dc; border-color: #66502b; }
+QPushButton:pressed { background: #33291b; }
+QPushButton#start_btn, QPushButton#import_btn { background: #2a2115; color: #e8b84b; border: 1px solid #8a6118; font-weight: 700; }
+QPushButton#start_btn:hover, QPushButton#import_btn:hover { background: #3a2b16; }
+QPushButton#sheets_btn, QPushButton#seasons_btn { background: #17181d; color: #ccc8bc; }
+QPushButton#search_clear { padding: 7px 10px; }
+QLineEdit#search { background: #13141a; color: #ece8dc; border: 1px solid #353840; border-radius: 3px; padding: 8px 10px; font-size: 12px; selection-background-color: #8a6118; }
+QLineEdit#search:focus { border-color: #c8922a; }
+QLabel#content_title { color: #ece8dc; font-size: 15px; font-weight: 650; letter-spacing: 1px; }
+QLabel#content_hint { color: #8c8a7e; font-size: 11px; }
+QWidget#content_header { background: #101115; border-bottom: 1px solid #2a2a2b; }
+QLabel#status_bar { background: #0f1014; color: #8c8a7e; border-top: 1px solid #22242c; font-size: 11px; padding: 3px 12px; }
+QTableWidget { background: #0b0c0e; alternate-background-color: #101115; color: #ccc8bc; gridline-color: #22242c; border: none; font-size: 12px; selection-background-color: #332919; }
+QHeaderView::section { background: #13141a; color: #a4a094; border: none; border-bottom: 1px solid #353840; padding: 10px 8px; font-size: 11px; font-weight: 700; }
+QTableWidget::item { padding: 7px 8px; border-bottom: 1px solid #1d1f24; }
+QTableWidget::item:selected { background: #332919; color: #ece8dc; }
+QTextEdit#log { background: #0b0c0e; color: #a4a094; border: none; font-family: Consolas, monospace; font-size: 11px; padding: 10px; }
+QProgressBar { background: #1d1f24; border: none; height: 4px; text-align: center; }
+QProgressBar::chunk { background: #c8922a; }
+QMenu { background: #17181d; color: #ccc8bc; border: 1px solid #353840; }
+QMenu::item { padding: 7px 20px; }
+QMenu::item:selected { background: #332919; color: #e8b84b; }
+QSplitter::handle { background: #22242c; }
 """
 
 class NumericItem(QTableWidgetItem):
@@ -387,18 +197,51 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Guild Tracker")
         self.setMinimumSize(1100, 680)
-        self.setStyleSheet(STYLESHEET)
+        self.resize(1320, 780)
+        self.setStyleSheet(style_for(STYLESHEET))
 
         self._current_season_id:   int | None = None
         self._current_season_name: str        = "Сезон не выбран"
         self._current_day:         int        = 1
-        self._thread:   QThread | None        = None
-        self._worker:   CollectWorker | None  = None
-        self._countdown_val = 0
 
         init_db()
         self._build_ui()
+        self._install_shortcuts()
         self._auto_select_last_season()
+
+    def refresh_theme(self):
+        self.setStyleSheet(style_for(STYLESHEET))
+        self.findChild(QWidget, "sidebar").setMinimumWidth(round(265 * ui_scale()))
+        self._load_table()
+
+    def _sheets_busy(self):
+        return any(getattr(self, name, None) is not None and getattr(self, name).isRunning()
+                   for name in ("_export_tabs", "_sheets_fetch", "_sheets_write",
+                                "_import_tabs", "_import_fetch", "_import_write"))
+
+    def closeEvent(self, event):
+        if self._sheets_busy():
+            self.status_bar.setText("Дождитесь завершения обмена с Google Таблицей.")
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _install_shortcuts(self):
+        for keys, action in (
+            ("Ctrl+F", self.search.setFocus),
+            ("Ctrl+O", self._open_manual_mode),
+            ("Ctrl+I", self._import_sheets),
+            ("Ctrl+Shift+I", self._open_network_capture),
+            ("Ctrl+E", self._export_sheets),
+            ("Ctrl+H", self._open_history),
+            ("Ctrl+Z", self._undo_last_import),
+        ):
+            QShortcut(QKeySequence(keys), self).activated.connect(action)
+        QShortcut(QKeySequence("Shift+F10"), self.table).activated.connect(
+            lambda: self._show_context_menu(
+                self.table.visualRect(self.table.currentIndex()).center()
+            )
+        )
 
     # ---------------------------------------------------------------- #
     #  UI construction                                                   #
@@ -426,13 +269,13 @@ class MainWindow(QMainWindow):
     def _build_topbar(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("topbar")
-        bar.setFixedHeight(56)
+        bar.setFixedHeight(66)
         h = QHBoxLayout(bar)
         h.setContentsMargins(16, 0, 16, 0)
 
         icon_label = QLabel()
-        ico_path = os.path.join(os.path.dirname(__file__), "..", "GuildBossToolkit.ico")
-        icon_pix = QPixmap(ico_path).scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio,
+        ico_path = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__))), "GuildBossToolkit.ico")
+        icon_pix = QPixmap(ico_path).scaled(28, 28, Qt.AspectRatioMode.KeepAspectRatio,
                                             Qt.TransformationMode.SmoothTransformation)
         icon_label.setPixmap(icon_pix)
         icon_label.setFixedSize(36, 36)
@@ -449,17 +292,15 @@ class MainWindow(QMainWindow):
         h.addStretch()
 
         self.count_label = QLabel("0 игроков")
-        self.count_label.setStyleSheet("color:#4a6a8a; font-size:12px; padding:0 8px;")
+        self.count_label.setObjectName("metric")
         h.addWidget(self.count_label)
 
         sep = QLabel("|")
-        sep.setStyleSheet("color:#1e2a40; font-size:16px;")
+        sep.setStyleSheet(style_for("color:#353840; font-size:16px;"))
         h.addWidget(sep)
 
         self.total_label = QLabel("Итоговый Счёт: —")
-        self.total_label.setStyleSheet(
-            "color:#f0c040; font-size:13px; font-weight:bold; padding:0 8px;"
-        )
+        self.total_label.setObjectName("metric")
         self.total_label.setToolTip("Сумма итоговых очков всех игроков гильдии")
         h.addWidget(self.total_label)
 
@@ -468,9 +309,15 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         side = QWidget()
         side.setObjectName("sidebar")
+        side.setMinimumWidth(round(265 * ui_scale()))
         v = QVBoxLayout(side)
-        v.setContentsMargins(12, 16, 12, 16)
-        v.setSpacing(8)
+        v.setContentsMargins(12, 10, 12, 14)
+        v.setSpacing(7)
+
+        def section(text: str):
+            label = QLabel(text)
+            label.setObjectName("nav_label")
+            v.addWidget(label)
 
         def action_btn(icon, text, slot) -> QPushButton:
             btn = QPushButton(f"{icon}  {text}")
@@ -478,45 +325,40 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(slot)
             return btn
 
-        self.stop_btn = QPushButton("■  Остановить")
-        self.stop_btn.setObjectName("stop_btn")
-        self.stop_btn.setVisible(False)
-        self.stop_btn.clicked.connect(self._stop_collection)
-        v.addWidget(self.stop_btn)
-
-        manual_btn = QPushButton("🖼  Обработка данных")
+        section("ИСТОЧНИКИ ДАННЫХ")
+        manual_btn = QPushButton("▣  Ручная обработка OCR")
         manual_btn.setObjectName("start_btn")
         manual_btn.clicked.connect(self._open_manual_mode)
         v.addWidget(manual_btn)
 
-        v.addSpacing(8)
+        network_btn = QPushButton("◇  Импорт из захвата данных")
+        network_btn.setProperty("class", "action")
+        network_btn.clicked.connect(self._open_network_capture)
+        v.addWidget(network_btn)
 
-        sheets_btn = QPushButton("📊  Синхронизация с\nGoogle Таблицей")
+        section("СИНХРОНИЗАЦИЯ")
+        sheets_btn = QPushButton("↗  Экспорт в Google Таблицу")
         sheets_btn.setObjectName("sheets_btn")
         sheets_btn.clicked.connect(self._export_sheets)
         v.addWidget(sheets_btn)
         
-        v.addSpacing(8)
-
-        import_btn = QPushButton("📥  Импорт из\nGoogle Таблицы")
+        import_btn = QPushButton("↙  Импорт из Google Таблицы")
         import_btn.setObjectName("import_btn")
         import_btn.clicked.connect(self._import_sheets)
         v.addWidget(import_btn)
 
-        v.addSpacing(8)
-
-        seasons_btn = QPushButton("📅  Сезоны")
+        section("УПРАВЛЕНИЕ")
+        seasons_btn = QPushButton("▦  Сезоны")
         seasons_btn.setObjectName("seasons_btn")
         seasons_btn.clicked.connect(self._open_seasons)
         v.addWidget(seasons_btn)
-        calib_auto_btn = action_btn("🔧", "Калибровка авто", self._open_calibration)
-        calib_auto_btn.setVisible(False)
-        v.addWidget(calib_auto_btn)
-        v.addWidget(action_btn("🎯", "Калибровка бейджа", self._open_badge_calibration))
-        v.addWidget(action_btn("⚙", "Настройки",       self._open_settings))
+        v.addWidget(action_btn("◇", "Калибровка OCR", self._open_badge_calibration))
+        v.addWidget(action_btn("▤", "История изменений", self._open_history))
+        v.addWidget(action_btn("↶", "Отменить последний импорт", self._undo_last_import))
+        v.addWidget(action_btn("⚙", "Настройки", self._open_settings))
 
-        v.addSpacing(8)
-        v.addWidget(action_btn("📄", "Экспорт CSV",  self._export_csv))
+        section("ФАЙЛЫ")
+        v.addWidget(action_btn("↗", "Экспорт CSV", self._export_csv))
 
         v.addStretch()
 
@@ -524,13 +366,35 @@ class MainWindow(QMainWindow):
 
     def _build_content(self) -> QSplitter:
         splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setStyleSheet("QSplitter::handle { background:#1e2a40; height:2px; }")
+        splitter.setStyleSheet(style_for("QSplitter::handle { background:#22242c; height:2px; }"))
 
         # Top: data table
         top = QWidget()
         tv = QVBoxLayout(top)
         tv.setContentsMargins(0, 0, 0, 0)
         tv.setSpacing(0)
+
+        header = QWidget()
+        header.setObjectName("content_header")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 14, 20, 14)
+        titles = QVBoxLayout()
+        title = QLabel("ТАБЛИЦА ГИЛЬДИИ")
+        title.setObjectName("content_title")
+        titles.addWidget(title)
+        hint = QLabel("Счёт игроков по дням сезона · двойной клик для правки")
+        hint.setObjectName("content_hint")
+        titles.addWidget(hint)
+        header_layout.addLayout(titles)
+        header_layout.addStretch()
+        self.search = QLineEdit()
+        self.search.setObjectName("search")
+        self.search.setPlaceholderText("Поиск игрока…")
+        self.search.setClearButtonEnabled(True)
+        self.search.setFixedWidth(240)
+        self.search.textChanged.connect(self._filter_table)
+        header_layout.addWidget(self.search)
+        tv.addWidget(header)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -544,11 +408,14 @@ class MainWindow(QMainWindow):
             "День 1", "День 2", "День 3", "День 4", "День 5", "День 6", "День 7",
             "Итого"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.ResizeToContents)
         for col in range(COL_DAY1, COL_TOTAL + 1):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(COL_POS, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setDefaultSectionSize(38)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
 
@@ -572,8 +439,8 @@ class MainWindow(QMainWindow):
         bv = QVBoxLayout(bottom)
         bv.setContentsMargins(0, 0, 0, 0)
 
-        log_header = QLabel("  ◈ Журнал")
-        log_header.setStyleSheet("background:#0f1520; color:#3a5a7a; font-size:12px; padding:4px 8px; border-bottom:1px solid #1e2a40;")
+        log_header = QLabel("  ЖУРНАЛ СОБЫТИЙ")
+        log_header.setStyleSheet(style_for("background:#13141a; color:#8c8a7e; font-size:11px; font-weight:700; letter-spacing:1px; padding:7px 14px; border-bottom:1px solid #22242c;"))
         bv.addWidget(log_header)
 
         self.log = QTextEdit()
@@ -587,7 +454,7 @@ class MainWindow(QMainWindow):
         return splitter
 
     def _build_statusbar(self) -> QLabel:
-        self.status_bar = QLabel("Готов  |  Выберите сезон и нажмите «Начать сбор»")
+        self.status_bar = QLabel("Готово · Выберите сезон и источник данных")
         self.status_bar.setObjectName("status_bar")
         self.status_bar.setFixedHeight(26)
         return self.status_bar
@@ -624,10 +491,23 @@ class MainWindow(QMainWindow):
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.show()
 
-    def _open_calibration(self):
-        dlg = CalibrationDialog(self)
-        dlg.calibration_saved.connect(lambda: self.status_bar.setText("Калибровка сохранена."))
-        dlg.exec()
+    def _open_network_capture(self):
+        if self._current_season_id is None:
+            mb_warning(self, "Сезон не выбран", "Сначала выберите или создайте сезон.")
+            return
+        from ui.network_capture_wait_dialog import NetworkCaptureWaitDialog
+        dialog = NetworkCaptureWaitDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.snapshot is not None:
+            self._show_network_preview(dialog.snapshot)
+
+    def _show_network_preview(self, snapshot):
+        from ui.network_import_dialog import NetworkImportDialog
+        dialog = NetworkImportDialog(
+            snapshot, self._current_season_id, self._current_season_name, self
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._load_table()
+            self.status_bar.setText(f"Импортировано {len(snapshot.players)} игроков из сетевого захвата.")
 
     def _open_badge_calibration(self):
         dlg = BadgeOffsetCalibrationDialog(self)
@@ -639,143 +519,27 @@ class MainWindow(QMainWindow):
     def _open_settings(self):
         SettingsDialog(self).exec()
 
-    def _start_collection(self):
-        if self._current_season_id is None:
-            mb_warning(self, "Сезон не выбран", "Сначала выберите или создайте сезон.")
+    def _open_history(self):
+        HistoryDialog(self._current_season_id, self).exec()
+
+    def _undo_last_import(self):
+        entry = latest_import()
+        if entry is None:
+            mb_info(self, "Откат импорта", "Нет импорта, который можно отменить.")
             return
-
-        sw, sh = pyautogui.size()
-        roi = get_roi_for_resolution(sw, sh)
-        if roi is None:
-            if mb_question(self, "Нет калибровки",
-                           f"Калибровка для {sw}×{sh} не найдена.\nОткрыть окно калибровки?"):
-                self._open_calibration()
+        if not mb_question(
+            self, "Откат импорта",
+            f"Восстановить БД до последнего импорта ({entry['source']}, {entry['finished_at']})?\n"
+            "Откат доступен, только если после импорта не было других изменений.",
+        ):
             return
-
-        day, ok = self._ask_day_number()
-        if not ok:
-            return
-        self._current_day = day
-
-        settings = load_settings()
-        countdown = settings.get("countdown_seconds", 5)
-        self._start_countdown(countdown, roi, settings)
-
-    def _ask_day_number(self) -> tuple[int, bool]:
-        """Show a dialog asking which day (1-7) to record. Auto-suggests from season dates."""
-        suggested = 1
-        if self._current_season_id is not None:
-            season = get_season(self._current_season_id)
-            if season and season.get("start_date"):
-                try:
-                    from datetime import datetime
-                    start = datetime.strptime(season["start_date"], "%Y-%m-%d").date()
-                    delta = (date_type.today() - start).days + 1
-                    suggested = max(1, min(7, delta))
-                except Exception:
-                    pass
-
-        val, ok = ask_int(
-            self,
-            "Выбор дня",
-            f"Укажите день сезона (1–7):\n(Авто-подсказка: День {suggested})",
-            value=suggested,
-            min_val=1,
-            max_val=7,
-        )
-        return val, ok
-
-    def _start_countdown(self, n: int, roi, settings):
-        self.start_btn.setVisible(False)
-        self.stop_btn.setVisible(True)
-        self.progress.setVisible(True)
-        self._log(f"Переключитесь в игру! Начало через {n} секунд… (День {self._current_day})")
-        self.status_bar.setText(f"Обратный отсчёт: {n}…")
-
-        self._countdown_val = n
-        self._roi_pending = roi
-        self._settings_pending = settings
-        self._cd_timer = QTimer(self)
-        self._cd_timer.timeout.connect(self._tick_countdown)
-        self._cd_timer.start(1000)
-
-    def _tick_countdown(self):
-        self._countdown_val -= 1
-        if self._countdown_val <= 0:
-            self._cd_timer.stop()
-            self.status_bar.setText("Сбор данных…")
-            self._run_worker(self._roi_pending, self._settings_pending)
-        else:
-            self._log(f"  {self._countdown_val}…")
-            self.status_bar.setText(f"Обратный отсчёт: {self._countdown_val}…")
-
-    def _run_worker(self, roi, settings):
-        self._worker = CollectWorker(roi, settings, self._current_season_id, self._current_day)
-        self._thread = QThread()
-        self._worker.moveToThread(self._thread)
-
-        self._thread.started.connect(self._worker.run)
-        self._worker.player_found.connect(self._on_player_found)
-        self._worker.log_message.connect(self._log)
-        self._worker.finished.connect(self._on_collection_finished)
-        self._worker.error.connect(self._on_collection_error)
-
-        self._thread.start()
-
-    def _stop_collection(self):
-        if self._worker:
-            self._worker.stop()
-        if hasattr(self, "_cd_timer"):
-            self._cd_timer.stop()
-        self._reset_controls()
-
-    def _on_player_found(self, pos: int, name: str, score: int):
-        """Add a row during live collection (day data populated on finish)."""
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-
-        pos_item = QTableWidgetItem(str(pos))
-        pos_item.setFlags(pos_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        self.table.setItem(row, COL_POS, pos_item)
-
-        name_item = QTableWidgetItem(name)
-        self.table.setItem(row, COL_NAME, name_item)
-
-        # Day columns — blank during live collection
-        for col in range(COL_DAY1, COL_TOTAL):
-            self.table.setItem(row, col, QTableWidgetItem(""))
-
-        score_item = NumericItem(f"{score:,}")
-        score_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.table.setItem(row, COL_TOTAL, score_item)
-
-        self.table.scrollToBottom()
-        self.count_label.setText(f"{self.table.rowCount()} игроков")
-        guild_total = sum(
-            int(self.table.item(r, COL_TOTAL).text().replace(",", ""))
-            for r in range(self.table.rowCount())
-            if self.table.item(r, COL_TOTAL) and self.table.item(r, COL_TOTAL).text()
-        )
-        self.total_label.setText(f"Итоговый Счёт: {guild_total}")
-
-    def _on_collection_finished(self, total: int):
-        self._reset_controls()
-        self._log(f"✅ Готово! Собрано игроков: {total}")
-        self.status_bar.setText(f"Сбор завершён — {total} игроков")
-        self._load_table()  # Reload to show day deltas
-
-    def _on_collection_error(self, msg: str):
-        self._reset_controls()
-        self._log(f"❌ Ошибка: {msg}")
-        mb_critical(self, "Ошибка сбора", msg)
-
-    def _reset_controls(self):
-        self.start_btn.setVisible(True)
-        self.stop_btn.setVisible(False)
-        self.progress.setVisible(False)
-        if self._thread:
-            self._thread.quit()
-            self._thread.wait()
+        try:
+            restore_latest_import()
+            init_db()
+            self._load_table()
+            self.status_bar.setText("Последний импорт отменён. Копия состояния до отката сохранена.")
+        except Exception as exc:
+            mb_warning(self, "Откат невозможен", str(exc))
 
     # ---------------------------------------------------------------- #
     #  Table                                                             #
@@ -785,6 +549,7 @@ class MainWindow(QMainWindow):
         if self._current_season_id is None:
             return
         rows = get_scores_for_season(self._current_season_id)
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
 
         for r in rows:
@@ -800,7 +565,7 @@ class MainWindow(QMainWindow):
             name_item = QTableWidgetItem(r["name"])
             name_item.setData(Qt.ItemDataRole.UserRole, r["player_id"])
             if r.get("locked"):
-                name_item.setForeground(QColor("#f0c040"))
+                name_item.setForeground(theme_color(QColor("#e8b84b")))
                 name_item.setToolTip("Имя заблокировано — не будет изменено OCR. ПКМ для разблокировки.")
             else:
                 name_item.setToolTip("Двойной клик — переименовать. ПКМ — заблокировать.")
@@ -823,7 +588,7 @@ class MainWindow(QMainWindow):
                     item.setToolTip(f"День {day}: прирост {val:,}\nСнапшот: {snapshot:,}\nДвойной клик — изменить.")
                 else:
                     item = QTableWidgetItem("—")
-                    item.setForeground(QColor("#3a5a7a"))
+                    item.setForeground(theme_color(QColor("#777267")))
                     item.setData(Qt.ItemDataRole.UserRole, {
                         "player_id": r["player_id"],
                         "day": day,
@@ -842,9 +607,9 @@ class MainWindow(QMainWindow):
         self.table.sortItems(COL_TOTAL, Qt.SortOrder.DescendingOrder)
 
         MEDAL = {
-            0: ("#ffe066", "#2a2a0f"),
-            1: ("#7a7aa9", "#6f6fee"),
-            2: ("#e0a070", "#2a1a0f"),
+            0: ("#e8b84b", "#272016"),
+            1: ("#c9c9c9", "#1d1f24"),
+            2: ("#c79268", "#231d1a"),
         }
         for i in range(self.table.rowCount()):
             pos_item = self.table.item(i, COL_POS)
@@ -855,13 +620,25 @@ class MainWindow(QMainWindow):
                     for c in range(self.table.columnCount()):
                         cell = self.table.item(i, c)
                         if cell:
-                            cell.setBackground(QColor(bg))
+                            cell.setBackground(theme_color(QColor(bg)))
                             if c != COL_NAME:
-                                cell.setForeground(QColor(color))
+                                cell.setForeground(theme_color(QColor(color)))
 
         self.count_label.setText(f"{len(rows)} игроков")
         guild_total = sum(r["total_score"] for r in rows if r["total_score"])
-        self.total_label.setText(f"Итоговый Счёт: {guild_total}")
+        self.total_label.setText(f"Итоговый счёт: {guild_total:,}")
+        self._filter_table(self.search.text())
+
+    def _filter_table(self, query: str):
+        query = query.strip().casefold()
+        visible = 0
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, COL_NAME)
+            hidden = bool(query) and (item is None or query not in item.text().casefold())
+            self.table.setRowHidden(row, hidden)
+            visible += not hidden
+        total = self.table.rowCount()
+        self.count_label.setText(f"{visible} из {total} игроков" if query else f"{total} игроков")
 
     # ---------------------------------------------------------------- #
     #  Editing (double-click)                                            #
@@ -926,12 +703,11 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle(f"День {day_number} — {player_name}")
         dlg.setMinimumWidth(360)
-        dlg.setStyleSheet(STYLESHEET + """
-            QDialog { background: #0f1520; }
-            QRadioButton { color: #c0d4f0; font-size: 13px; padding: 4px 0; }
+        dlg.setStyleSheet(style_for(DIALOG_STYLE + """
+            QRadioButton { color: #ccc8bc; font-size: 13px; padding: 4px 0; }
             QRadioButton::indicator { width: 15px; height: 15px; }
-            QLabel#hint { color: #6a8aaf; font-size: 12px; }
-        """)
+            QLabel#hint { color: #8c8a7e; font-size: 12px; }
+        """))
         layout = QVBoxLayout(dlg)
         layout.setSpacing(10)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -946,35 +722,9 @@ class MainWindow(QMainWindow):
         hint.setObjectName("hint")
         layout.addWidget(hint)
 
-        spin = QSpinBox()
+        spin = AppSpinBox()
         spin.setRange(0, 999_999_999)
         spin.setValue(current_delta)
-        spin.setStyleSheet("""
-            QSpinBox {
-                background: #111c30; color: #d0ddf0;
-                border: 1px solid #2a3a5a; border-radius: 4px;
-                padding: 4px 8px; font-size: 14px;
-            }
-            QSpinBox::up-button {
-                subcontrol-origin: border; subcontrol-position: top right;
-                width: 20px; border-left: 1px solid #2a3a5a;
-                border-bottom: 1px solid #2a3a5a; background: #1a2a40;
-            }
-            QSpinBox::down-button {
-                subcontrol-origin: border; subcontrol-position: bottom right;
-                width: 20px; border-left: 1px solid #2a3a5a; background: #1a2a40;
-            }
-            QSpinBox::up-arrow {
-                width: 0; height: 0;
-                border-left: 4px solid transparent; border-right: 4px solid transparent;
-                border-bottom: 5px solid #7090b0;
-            }
-            QSpinBox::down-arrow {
-                width: 0; height: 0;
-                border-left: 4px solid transparent; border-right: 4px solid transparent;
-                border-top: 5px solid #7090b0;
-            }
-        """)
         layout.addWidget(spin)
 
         def _on_mode_toggled():
@@ -1010,7 +760,7 @@ class MainWindow(QMainWindow):
         row = self.table.rowAt(pos.y())
 
         menu = QMenu(self)
-        menu.setStyleSheet(STYLESHEET)
+        menu.setStyleSheet(style_for(STYLESHEET))
 
         if row >= 0:
             name_item = self.table.item(row, COL_NAME)
@@ -1093,22 +843,29 @@ class MainWindow(QMainWindow):
         if not path:
             return
         rows = get_scores_for_season(self._current_season_id)
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "Position", "Player",
-                "Day1", "Day2", "Day3", "Day4", "Day5", "Day6", "Day7",
-                "Total Score"
-            ])
-            for r in rows:
-                day_cols = [r["daily_scores"].get(d, "") for d in range(1, 8)]
-                # Replace None with empty string
-                day_cols = ["" if v is None else v for v in day_cols]
-                writer.writerow([r["position"], r["name"]] + day_cols + [r["total_score"]])
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "Position", "Player",
+                    "Day1", "Day2", "Day3", "Day4", "Day5", "Day6", "Day7",
+                    "Total Score"
+                ])
+                for r in rows:
+                    day_cols = [r["daily_scores"].get(d, "") for d in range(1, 8)]
+                    # Replace None with empty string
+                    day_cols = ["" if v is None else v for v in day_cols]
+                    writer.writerow([r["position"], r["name"]] + day_cols + [r["total_score"]])
+        except OSError as exc:
+            mb_critical(self, "Ошибка экспорта CSV", str(exc))
+            return
         self._log(f"📄 CSV экспортирован: {path}")
         self.status_bar.setText("Экспорт CSV завершён.")
 
     def _export_sheets(self):
+        if self._sheets_busy():
+            self.status_bar.setText("Обмен с Google Таблицей уже выполняется.")
+            return
         from config.settings_manager import load_settings
         settings = load_settings()
         sheet_id = settings.get("google_sheets_id", "").strip()
@@ -1126,7 +883,27 @@ class MainWindow(QMainWindow):
             mb_warning(self, "Google Sheets", "Выберите сезон для синхронизации.")
             return
 
-        self._sheets_fetch = _SheetsFetchWorker(creds_path, sheet_id, self._current_season_id)
+        self._export_tabs = _SheetsImportTabsWorker(creds_path, sheet_id, self._current_season_id)
+        self._export_tabs.finished.connect(self._on_export_tabs_ready)
+        self._export_tabs.error.connect(self._on_sheets_error)
+        self._export_tabs.start()
+        self.status_bar.setText("Загрузка списка листов Google Таблицы…")
+
+    def _on_export_tabs_ready(self, worksheets):
+        from config.settings_manager import load_settings, save_settings
+        from ui.sheets_tab_dialog import SheetsTabDialog
+
+        worker = self._export_tabs
+        settings = load_settings()
+        saved_id = settings.get("google_worksheet_ids", {}).get(worker.sheet_id)
+        dialog = SheetsTabDialog(worksheets, saved_id, worker.sheet_id, parent=self, exporting=True)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.status_bar.setText("Экспорт отменён.")
+            return
+        settings.setdefault("google_worksheet_ids", {})[worker.sheet_id] = dialog.worksheet_id
+        save_settings(settings)
+        self._sheets_fetch = _SheetsFetchWorker(
+            worker.creds_path, worker.sheet_id, worker.season_id, dialog.worksheet_id)
         self._sheets_fetch.finished.connect(self._on_sheets_preview_ready)
         self._sheets_fetch.error.connect(self._on_sheets_error)
         self._sheets_fetch.start()
@@ -1156,6 +933,9 @@ class MainWindow(QMainWindow):
         mb_critical(self, "Google Sheets — ошибка", message)
 
     def _import_sheets(self):
+        if self._sheets_busy():
+            self.status_bar.setText("Обмен с Google Таблицей уже выполняется.")
+            return
         from config.settings_manager import load_settings
         settings = load_settings()
         sheet_id = settings.get("google_sheets_id", "").strip()
@@ -1173,24 +953,44 @@ class MainWindow(QMainWindow):
             mb_warning(self, "Импорт из Google Sheets", "Выберите сезон для импорта.")
             return
 
-        if not mb_question(
-            self, "Импорт из Google Sheets",
-            "Данные из Google Sheets будут записаны в локальную БД.\n"
-            "Существующие данные за те же дни будут перезаписаны.\n\n"
-            "Продолжить?"
-        ):
+        self._import_tabs = _SheetsImportTabsWorker(
+            creds_path, sheet_id, self._current_season_id
+        )
+        self._import_tabs.finished.connect(self._on_import_tabs_ready)
+        self._import_tabs.error.connect(self._on_import_error)
+        self._import_tabs.start()
+        self.status_bar.setText("Загрузка списка листов Google Таблицы…")
+
+    def _on_import_tabs_ready(self, worksheets):
+        from config.settings_manager import load_settings
+        from ui.sheets_tab_dialog import SheetsTabDialog
+
+        worker = self._import_tabs
+        settings = load_settings()
+        saved_id = settings.get("google_worksheet_ids", {}).get(worker.sheet_id)
+        name = next((entry.get("name") or worker.sheet_id
+                     for entry in settings.get("google_sheets_history", [])
+                     if entry.get("id") == worker.sheet_id), worker.sheet_id)
+        dialog = SheetsTabDialog(worksheets, saved_id, name, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.status_bar.setText("Импорт отменён.")
             return
 
         self._import_fetch = _SheetsImportFetchWorker(
-            creds_path, sheet_id, self._current_season_id
+            worker.creds_path, worker.sheet_id, worker.season_id,
+            dialog.worksheet_id,
         )
         self._import_fetch.finished.connect(self._on_import_preview_ready)
         self._import_fetch.error.connect(self._on_import_error)
         self._import_fetch.start()
-        self.status_bar.setText("Загрузка данных из Google Sheets для импорта…")
+        self.status_bar.setText(f"Загрузка листа «{dialog.combo.currentText()}»…")
 
     def _on_import_preview_ready(self, preview):
-        self.status_bar.setText("Данные загружены. Откройте предпросмотр импорта.")
+        from config.settings_manager import load_settings, save_settings
+        settings = load_settings()
+        settings.setdefault("google_worksheet_ids", {})[preview.sheet_id] = preview.worksheet_id
+        save_settings(settings)
+        self.status_bar.setText(f"Загружен лист «{preview.worksheet_title}».")
         from ui.sheets_import_preview_dialog import SheetsImportPreviewDialog
         dlg = SheetsImportPreviewDialog(preview, parent=self)
         if dlg.exec() != SheetsImportPreviewDialog.DialogCode.Accepted:

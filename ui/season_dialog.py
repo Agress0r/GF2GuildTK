@@ -1,37 +1,13 @@
-from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QSpinBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QDateEdit
-)
+from ui.controls import AppSpinBox, ui_scale
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QDateEdit
 from ui.style_utils import mb_info, mb_question
-from PyQt6.QtCore import Qt, pyqtSignal, QDate
-from PyQt6.QtGui import QColor
+from ui.theme import DIALOG_STYLE, style_for
+from PyQt6.QtCore import pyqtSignal, QDate
 from db.database import get_all_seasons, create_season, delete_season
 
 STYLESHEET = """
-QDialog { background:#0a0e17; color:#d0ddf0; font-family:'Segoe UI',sans-serif; }
-QLabel { color:#c8d8f0; font-size:13px; }
-QLabel#title { font-size:18px; font-weight:bold; color:#f0c040; padding:8px 0; }
-QLineEdit, QSpinBox, QDateEdit {
-    background:#1a2035; color:#d0ddf0; border:1px solid #2a3a5a;
-    border-radius:4px; padding:5px 8px; font-size:13px; }
 QDateEdit::drop-down { border:none; width:20px; }
 QDateEdit::down-arrow { image:none; }
-QPushButton {
-    background:#1e2840; color:#c8d8f0; border:1px solid #2a3a5a;
-    border-radius:6px; padding:7px 16px; font-size:13px; }
-QPushButton:hover { background:#2a3a5a; }
-QPushButton#primary { background:#1a4a7a; border-color:#3a7abf; color:#fff; font-weight:bold; }
-QPushButton#primary:hover { background:#2a5a9a; }
-QPushButton#danger { background:#4a1a1a; border-color:#8a3a3a; color:#ff9090; }
-QPushButton#danger:hover { background:#6a2a2a; }
-QTableWidget {
-    background:#111820; color:#c8d8f0; gridline-color:#1e2a3a;
-    border:1px solid #2a3a5a; border-radius:4px; font-size:13px; }
-QHeaderView::section {
-    background:#1a2435; color:#8aabcf; border:none;
-    padding:6px; font-size:12px; font-weight:bold; }
-QTableWidget::item:selected { background:#1e3a5a; color:#ffffff; }
 """
 
 
@@ -41,7 +17,7 @@ class SeasonDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Сезоны — Guild Tracker")
-        self.setStyleSheet(STYLESHEET)
+        self.setStyleSheet(style_for(DIALOG_STYLE + STYLESHEET))
         self.setMinimumSize(720, 480)
         self._build_ui()
         self._load_seasons()
@@ -58,7 +34,7 @@ class SeasonDialog(QDialog):
         # Create new season form
         form_row = QHBoxLayout()
         form_row.addWidget(QLabel("Сезон №"))
-        self.num_spin = QSpinBox()
+        self.num_spin = AppSpinBox()
         self.num_spin.setRange(1, 9999)
         self.num_spin.setValue(1)
         form_row.addWidget(self.num_spin)
@@ -73,12 +49,12 @@ class SeasonDialog(QDialog):
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDate(QDate.currentDate())
         self.start_date_edit.setDisplayFormat("dd.MM.yyyy")
-        self.start_date_edit.setFixedWidth(120)
+        self.start_date_edit.setFixedWidth(round(140 * ui_scale()))
         form_row.addWidget(self.start_date_edit)
 
         form_row.addWidget(QLabel("Конец:"))
         self.end_date_label = QLabel("")
-        self.end_date_label.setFixedWidth(90)
+        self.end_date_label.setFixedWidth(round(100 * ui_scale()))
         form_row.addWidget(self.end_date_label)
 
         create_btn = QPushButton("+ Создать")
@@ -142,9 +118,12 @@ class SeasonDialog(QDialog):
             self.table.setItem(i, 3, QTableWidgetItem(s.get("created_at", "")[:10]))
             del_btn = QPushButton("Удалить")
             del_btn.setObjectName("danger")
+            del_btn.setProperty("compact", True)
+            self.table.setRowHeight(i, round(34 * ui_scale()))
             del_btn.clicked.connect(lambda _, sid=s["id"]: self._delete_season(sid))
             self.table.setCellWidget(i, 4, del_btn)
         self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(4, round(90 * ui_scale()))
         if seasons:
             self.num_spin.setValue(seasons[0]["number"] + 1)
 

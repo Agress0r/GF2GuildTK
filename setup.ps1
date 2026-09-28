@@ -409,7 +409,7 @@ if (Test-Path -LiteralPath "credentials.json") {
 
 Write-Log ""
 Write-Log "[8/8] Running smoke-test..."
-$smoke = "import sys, os; assert sys.version_info[:2] == (3, 12); os.environ.setdefault('ORT_LOGGING_LEVEL','3'); import PIL, numpy, cv2, onnxruntime, ddddocr, gspread, pyautogui, pygetwindow; from rapidocr_onnxruntime import RapidOCR; import google.oauth2.service_account; import core.ocr, core.badge_detector, core.capture, db.database; import PyQt6.QtWidgets; import ui.main_window; assert os.path.exists('main.py'); assert os.path.isdir('assets/badges'); print('smoke-test OK')"
+$smoke = "import sys, os; assert sys.version_info[:2] == (3, 12); os.environ.setdefault('ORT_LOGGING_LEVEL','3'); import PIL, numpy, cv2, onnxruntime, ddddocr, gspread, scapy; from rapidocr_onnxruntime import RapidOCR; import google.oauth2.service_account; import core.ocr, core.badge_detector, core.manual_processor, core.network_capture, db.database; import PyQt6.QtWidgets; import ui.main_window; assert os.path.exists('main.py'); assert os.path.isdir('assets/badges'); print('smoke-test OK')"
 $smokeCode = Invoke-Logged -FilePath $VenvPython -Arguments @("-c", $smoke) -AllowFailure
 if ($smokeCode -ne 0) {
     Write-Log "If the traceback mentions onnxruntime DLL load failure, install Microsoft Visual C++ Redistributable 2015-2022 x64 and rerun setup.bat."
@@ -427,7 +427,7 @@ Write-Log "  run.bat"
 Write-Log ""
 Write-Log "First launch:"
 Write-Log "  1. Create a season with the Seasons button."
-Write-Log "  2. Calibrate capture zones with Calibration."
+Write-Log "  2. For OCR, load screenshots and calibrate badge offsets."
 Write-Log ""
 Write-Log "Google Sheets:"
 Write-Log "  Put credentials.json in the project root or select it in Settings."

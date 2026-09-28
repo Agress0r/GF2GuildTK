@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 import io
 import traceback
-from pathlib import Path
 from PIL import Image, ImageFilter, ImageEnhance
 import numpy as np
 
@@ -77,92 +76,6 @@ def _log(log, msg: str):
 
 
 # ------------------------------------------------------------------ #
-#  Public API                                                          #
-# ------------------------------------------------------------------ #
-
-def extract_row_data(
-    screenshot: Image.Image,
-    roi: dict,
-    screen_w: int,
-    screen_h: int,
-    log=None,
-    save_debug: bool = False,
-    screenshot_index: int = 0,
-) -> list[tuple[int, str, int]]:
-    """
-    Returns list of (position, name, total_score).
-    log        — callable(str) piped to UI journal
-    save_debug — dump every crop to debug_crops/ folder
-    """
-    from core.capture import crop_roi
-
-    rows_cfg = roi.get("rows", [])
-    _log(log, f"[Скриншот #{screenshot_index}] ROI: {len(rows_cfg)} строк | экран {screen_w}x{screen_h}")
-
-    if not rows_cfg:
-        _log(log, "  ⚠ ROI пустой. Пересохрани калибровку.")
-        return []
-
-    results = []
-    for i, row in enumerate(rows_cfg):
-        _log(log, f"  ── Строка {i + 1}/{len(rows_cfg)} ──")
-        try:
-            badge_rect = row.get("badge")
-            name_rect  = row.get("name")
-            score_rect = row.get("score")
-
-            if not all([badge_rect, name_rect, score_rect]):
-                _log(log, "    ⚠ Пропуск: отсутствует зона badge/name/score в ROI")
-                continue
-
-            # Log pixel coordinates for sanity check
-            for zone, rect in [("badge", badge_rect), ("name", name_rect), ("score", score_rect)]:
-                px = int(rect["x"] * screen_w)
-                py = int(rect["y"] * screen_h)
-                pw = int(rect["w"] * screen_w)
-                ph = int(rect["h"] * screen_h)
-                _log(log, f"    {zone:5s}: px=({px},{py}) size={pw}x{ph}")
-
-            badge_img = crop_roi(screenshot, badge_rect, screen_w, screen_h)
-            name_img  = crop_roi(screenshot, name_rect,  screen_w, screen_h)
-            score_img = crop_roi(screenshot, score_rect, screen_w, screen_h)
-
-            _log(log, f"    Кропы (после upscale): badge={badge_img.size} "
-                      f"name={name_img.size} score={score_img.size}")
-
-            if save_debug:
-                _save_debug_crop(badge_img, f"s{screenshot_index:03d}_r{i + 1}_badge")
-                _save_debug_crop(name_img,  f"s{screenshot_index:03d}_r{i + 1}_name")
-                _save_debug_crop(score_img, f"s{screenshot_index:03d}_r{i + 1}_score")
-
-            position = _read_number(badge_img, label=f"badge r{i + 1}", log=log)
-            name     = _read_text(name_img,    label=f"name  r{i + 1}", log=log)
-            score    = _read_number(score_img, label=f"score r{i + 1}", log=log)
-
-            _log(log, f"    → pos={position!r}  name={name!r}  score={score!r}")
-
-            if position is None:
-                _log(log, "    ⚠ Пропуск: позиция не распознана")
-                continue
-            if not name:
-                _log(log, "    ⚠ Пропуск: имя пустое")
-                continue
-            if score is None:
-                _log(log, "    ⚠ Пропуск: счёт не распознан")
-                continue
-
-            results.append((position, name.strip(), score))
-            _log(log, f"    ✓ #{position}  {name}  →  {score:,}")
-
-        except Exception as e:
-            _log(log, f"    ❌ Исключение в строке {i + 1}: {e}")
-            _log(log, f"       {traceback.format_exc().splitlines()[-1]}")
-
-    _log(log, f"[Скриншот #{screenshot_index}] Принято {len(results)}/{len(rows_cfg)}")
-    return results
-
-
-# ------------------------------------------------------------------ #
 #  Number reader — ddddocr (ONNX, no PyTorch)                        #
 # ------------------------------------------------------------------ #
 
@@ -176,15 +89,22 @@ def _read_number(img: Image.Image, label: str = "", log=None) -> int | None:
             buf = io.BytesIO()
             _preprocess(img).save(buf, format="PNG")
             raw = ocr.classification(buf.getvalue())
-            digits = re.sub(r"\D", "", str(raw))
-            _log(log, f"    [dddd {label}] raw={raw!r}  digits={digits!r}")
-            if digits:
-                return int(digits)
+            value = _parse_number(raw)
+            _log(log, f"    [dddd {label}] raw={raw!r}  value={value!r}")
+            if value is not None:
+                return value
             _log(log, f"    [dddd {label}] пусто → пробую RapidOCR")
     except Exception as e:
         _log(log, f"    [dddd {label}] ❌ {e} → пробую RapidOCR")
 
-    # Fallback: RapidOCR (filter to digits afterwards)
+    # Mixed output such as '10oo' must not silently become 10. Recognize the
+    # whole line with the independent model before trying detection.
+    text, confidence = _read_text_with_confidence(img, label=label, log=log)
+    value = _parse_number(text)
+    if value is not None and confidence >= 0.5:
+        return value
+
+    # Fallback: RapidOCR with text detection.
     try:
         ocr   = _get_rapid(log)
         if ocr is None:
@@ -192,9 +112,9 @@ def _read_number(img: Image.Image, label: str = "", log=None) -> int | None:
             return None
         result, _ = ocr(_preprocess_np(img))
         texts = [r[1] for r in result] if result else []
-        joined = re.sub(r"\D", "", "".join(texts))
+        joined = "".join(texts)
         _log(log, f"    [rapid {label}] raw={texts!r}  digits={joined!r}")
-        return int(joined) if joined else None
+        return _parse_number(joined)
     except Exception as e:
         _log(log, f"    [rapid {label}] ❌ {e}")
         return None
@@ -204,12 +124,23 @@ def _read_number(img: Image.Image, label: str = "", log=None) -> int | None:
 #  Text reader — RapidOCR (ONNX, Chinese + Latin)                    #
 # ------------------------------------------------------------------ #
 
+def _parse_number(raw) -> int | None:
+    text = str(raw).strip()
+    if not re.fullmatch(r"[0-9]+|[0-9]{1,3}(?:[ ,\u00a0\u202f][0-9]{3})+", text):
+        return None
+    return int(re.sub(r"[ ,\u00a0\u202f]", "", text))
+
+
 def _read_text(img: Image.Image, label: str = "", log=None) -> str:
+    return _read_text_with_confidence(img, label, log)[0]
+
+
+def _read_text_with_confidence(img: Image.Image, label: str = "", log=None) -> tuple[str, float]:
     try:
         ocr = _get_rapid(log)
         if ocr is None:
             _log(log, f"    [rapid {label}] недоступна")
-            return ""
+            return "", 0.0
         # Add padding so characters near crop edges are not cut off
         from PIL import ImageOps
         padded = ImageOps.expand(img, border=8, fill=(255, 255, 255))
@@ -221,16 +152,39 @@ def _read_text(img: Image.Image, label: str = "", log=None) -> str:
         # so text is r[0]; with det=True it would be r[1]. Handle both.
         if result:
             texts = [r[0] if len(r) == 2 else r[1] for r in result]
+            confidences = [float(r[1] if len(r) == 2 else r[2]) for r in result]
         else:
             texts = []
-        # Player names never contain spaces; remove any spaces the recognizer adds
+            confidences = []
+        # Player names never contain spaces; remove any spaces the recognizer adds.
         text = "".join(texts).replace(" ", "").strip()
+        # A short name in a wide crop can be too small for line recognition.
+        # Retry only an empty result, using the foreground bounds against the
+        # border colour. This also works for light text on a dark background.
+        if not text:
+            pixels = np.asarray(img.convert("RGB"), dtype=np.int16)
+            border = np.concatenate((pixels[0], pixels[-1], pixels[:, 0], pixels[:, -1]))
+            background = np.median(border, axis=0).astype(np.int16)
+            foreground = np.max(np.abs(pixels - background), axis=2) > 35
+            if 0 < foreground.mean() < 0.5:
+                ys, xs = np.nonzero(foreground)
+                left, top = max(0, int(xs.min()) - 4), max(0, int(ys.min()) - 4)
+                right = min(img.width, int(xs.max()) + 5)
+                bottom = min(img.height, int(ys.max()) + 5)
+                focused = img.crop((left, top, right, bottom)).convert("RGB")
+                focused = ImageOps.expand(focused, border=8, fill=tuple(int(v) for v in background))
+                retry, _ = ocr(np.array(focused), use_det=False, use_cls=False)
+                if retry:
+                    texts = [r[0] if len(r) == 2 else r[1] for r in retry]
+                    confidences = [float(r[1] if len(r) == 2 else r[2]) for r in retry]
+                    text = "".join(texts).replace(" ", "").strip()
         _log(log, f"    [rapid {label}] raw={texts!r}  →  {text!r}")
-        return text
+        confidence = min(confidences) if confidences else 0.0
+        return text, confidence
     except Exception as e:
         _log(log, f"    [rapid {label}] ❌ {e}")
         _log(log, f"       {traceback.format_exc().splitlines()[-1]}")
-        return ""
+        return "", 0.0
 
 
 # ------------------------------------------------------------------ #
@@ -246,17 +200,3 @@ def _preprocess(img: Image.Image) -> Image.Image:
 
 def _preprocess_np(img: Image.Image) -> np.ndarray:
     return np.array(_preprocess(img))
-
-
-# ------------------------------------------------------------------ #
-#  Debug helpers                                                      #
-# ------------------------------------------------------------------ #
-
-def _save_debug_crop(img: Image.Image, name: str):
-    try:
-        d = Path("debug_crops")
-        d.mkdir(exist_ok=True)
-        img.save(d / f"{name}.png")
-    except Exception:
-        pass
-# Есть предположение что он лишний раз обрабатывает изображения.Область с екстом дополнительно ещё раз обрабатывает хотя это не нужно. Нужно короче пересмотреть эту часть.

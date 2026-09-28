@@ -1,59 +1,16 @@
+from ui.controls import AppDoubleSpinBox
 from datetime import date
 
-from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QDoubleSpinBox, QSpinBox,
-    QGroupBox, QFileDialog, QComboBox
-)
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QCheckBox, QApplication, QGroupBox, QFileDialog, QComboBox
 from ui.style_utils import mb_warning, mb_info, mb_question, ask_text
-from PyQt6.QtCore import Qt
+from ui.theme import DIALOG_STYLE, style_for
+from ui.controls import AppComboBox, ui_scale
 from config.settings_manager import load_settings, save_settings
 
 STYLESHEET = """
-QDialog { background: #0a0e17; color: #d0ddf0; font-family: 'Segoe UI', sans-serif; }
-QGroupBox { border: 1px solid #2a3a5a; border-radius:6px; margin-top:10px;
-            color:#8aabcf; font-size:12px; padding:10px; }
+QGroupBox { border: 1px solid #353840; border-radius:6px; margin-top:10px;
+            color:#a4a094; font-size:12px; padding:10px; }
 QGroupBox::title { subcontrol-origin: margin; left: 8px; }
-QLabel { color:#c8d8f0; font-size:13px; }
-QLabel#title { font-size:18px; font-weight:bold; color:#f0c040; padding:8px 0; }
-QLineEdit, QDoubleSpinBox, QSpinBox {
-    background:#1a2035; color:#d0ddf0; border:1px solid #2a3a5a;
-    border-radius:4px; padding:5px 8px; font-size:13px; }
-QDoubleSpinBox::up-button, QSpinBox::up-button {
-    subcontrol-origin: border; subcontrol-position: top right;
-    width:18px; border-left:1px solid #2a3a5a; border-bottom:1px solid #2a3a5a;
-    border-top-right-radius:4px; background:#1e2840; }
-QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover { background:#2a3a5a; }
-QDoubleSpinBox::up-button:pressed, QSpinBox::up-button:pressed { background:#3a4a6a; }
-QDoubleSpinBox::down-button, QSpinBox::down-button {
-    subcontrol-origin: border; subcontrol-position: bottom right;
-    width:18px; border-left:1px solid #2a3a5a; border-top:1px solid #2a3a5a;
-    border-bottom-right-radius:4px; background:#1e2840; }
-QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover { background:#2a3a5a; }
-QDoubleSpinBox::down-button:pressed, QSpinBox::down-button:pressed { background:#3a4a6a; }
-QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {
-    image: none; width:0; height:0;
-    border-left:4px solid transparent; border-right:4px solid transparent;
-    border-bottom:5px solid #8aabcf; }
-QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {
-    image: none; width:0; height:0;
-    border-left:4px solid transparent; border-right:4px solid transparent;
-    border-top:5px solid #8aabcf; }
-QComboBox {
-    background:#1a2035; color:#d0ddf0; border:1px solid #2a3a5a;
-    border-radius:4px; padding:5px 8px; font-size:10pt; }
-QComboBox::drop-down { border: none; }
-QComboBox QAbstractItemView {
-    background:#1a2035; color:#d0ddf0; selection-background-color:#2a3a5a;
-    font-size:10pt; }
-QPushButton {
-    background:#1e2840; color:#c8d8f0; border:1px solid #2a3a5a;
-    border-radius:6px; padding:7px 16px; font-size:13px; }
-QPushButton:hover { background:#2a3a5a; }
-QPushButton#primary { background:#1a4a7a; border-color:#3a7abf; color:#fff; font-weight:bold; }
-QPushButton#primary:hover { background:#2a5a9a; }
-QPushButton#danger { background:#3a1a1a; border-color:#7a2a2a; color:#f08080; }
-QPushButton#danger:hover { background:#4a2a2a; }
 """
 
 
@@ -61,7 +18,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки — Guild Tracker")
-        self.setStyleSheet(STYLESHEET)
+        self.setStyleSheet(style_for(DIALOG_STYLE + STYLESHEET))
         self.setMinimumWidth(520)
         self._settings = load_settings()
         # Work on a mutable copy of history so we can add/remove without saving immediately
@@ -76,51 +33,6 @@ class SettingsDialog(QDialog):
         title = QLabel("Настройки")
         title.setObjectName("title")
         layout.addWidget(title)
-
-        # Capture group
-        cap_group = QGroupBox("Захват экрана")
-        cap_layout = QVBoxLayout(cap_group)
-
-        pause_row = QHBoxLayout()
-        pause_row.addWidget(QLabel("Пауза между скроллами (сек):"))
-        self.pause_spin = QDoubleSpinBox()
-        self.pause_spin.setRange(0.3, 10.0)
-        self.pause_spin.setSingleStep(0.1)
-        self.pause_spin.setValue(self._settings.get("scroll_pause", 1.0))
-        pause_row.addWidget(self.pause_spin)
-        cap_layout.addLayout(pause_row)
-
-        scroll_row = QHBoxLayout()
-        scroll_row.addWidget(QLabel("Скролл (строк за шаг):"))
-        self.scroll_spin = QSpinBox()
-        self.scroll_spin.setRange(1, 20)
-        self.scroll_spin.setValue(self._settings.get("scroll_amount", 3))
-        scroll_row.addWidget(self.scroll_spin)
-        cap_layout.addLayout(scroll_row)
-
-        ticks_row = QHBoxLayout()
-        ticks_row.addWidget(QLabel("Тиков на строку (подбери если скролл не работает):"))
-        self.ticks_spin = QSpinBox()
-        self.ticks_spin.setRange(1, 30)
-        self.ticks_spin.setValue(self._settings.get("ticks_per_row", 5))
-        ticks_row.addWidget(self.ticks_spin)
-        cap_layout.addLayout(ticks_row)
-
-        countdown_row = QHBoxLayout()
-        countdown_row.addWidget(QLabel("Обратный отсчёт перед стартом (сек):"))
-        self.countdown_spin = QSpinBox()
-        self.countdown_spin.setRange(1, 30)
-        self.countdown_spin.setValue(self._settings.get("countdown_seconds", 5))
-        countdown_row.addWidget(self.countdown_spin)
-        cap_layout.addLayout(countdown_row)
-
-        from PyQt6.QtWidgets import QCheckBox
-        self.debug_crops_cb = QCheckBox("Сохранять кропы каждого скриншота в debug_crops/")
-        self.debug_crops_cb.setStyleSheet("color:#8aabcf; font-size:12px;")
-        self.debug_crops_cb.setChecked(self._settings.get("debug_save_crops", False))
-        cap_layout.addWidget(self.debug_crops_cb)
-
-        layout.addWidget(cap_group)
 
         # Database group
         db_group = QGroupBox("База данных")
@@ -139,19 +51,21 @@ class SettingsDialog(QDialog):
         # Sheet selector row
         gs_layout.addWidget(QLabel("Таблица:"))
         sheet_row = QHBoxLayout()
-        self.gs_combo = QComboBox()
+        self.gs_combo = AppComboBox()
         self.gs_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self._populate_combo()
         sheet_row.addWidget(self.gs_combo, stretch=1)
 
         add_btn = QPushButton("+")
-        add_btn.setFixedWidth(32)
+        add_btn.setProperty("compact", True)
+        add_btn.setFixedWidth(round(36 * ui_scale()))
         add_btn.setToolTip("Добавить таблицу по ID")
         add_btn.clicked.connect(self._add_sheet)
         sheet_row.addWidget(add_btn)
 
         del_btn = QPushButton("×")
-        del_btn.setFixedWidth(32)
+        del_btn.setProperty("compact", True)
+        del_btn.setFixedWidth(round(36 * ui_scale()))
         del_btn.setObjectName("danger")
         del_btn.setToolTip("Удалить выбранную таблицу из истории")
         del_btn.clicked.connect(self._remove_sheet)
@@ -170,6 +84,22 @@ class SettingsDialog(QDialog):
         gs_layout.addLayout(cred_row)
 
         layout.addWidget(gs_group)
+
+        accessibility = QGroupBox("Доступность")
+        access_layout = QVBoxLayout(accessibility)
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("Масштаб текста:"))
+        self.font_scale = AppDoubleSpinBox()
+        self.font_scale.setRange(1.0, 1.6)
+        self.font_scale.setSingleStep(0.1)
+        self.font_scale.setValue(float(self._settings.get("font_scale", 1.0)))
+        self.font_scale.setSuffix("×")
+        font_row.addWidget(self.font_scale)
+        access_layout.addLayout(font_row)
+        self.high_contrast = QCheckBox("Высокий контраст")
+        self.high_contrast.setChecked(bool(self._settings.get("high_contrast", False)))
+        access_layout.addWidget(self.high_contrast)
+        layout.addWidget(accessibility)
 
         layout.addStretch()
 
@@ -277,15 +207,12 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _save(self):
-        self._settings["scroll_pause"]            = self.pause_spin.value()
-        self._settings["scroll_amount"]           = self.scroll_spin.value()
-        self._settings["ticks_per_row"]           = self.ticks_spin.value()
-        self._settings["countdown_seconds"]       = self.countdown_spin.value()
-        self._settings["debug_save_crops"]        = self.debug_crops_cb.isChecked()
         self._settings["db_path"]                 = self.db_path_edit.text()
         self._settings["google_sheets_id"]        = self._selected_sheet_id()
         self._settings["google_credentials_path"] = self.cred_edit.text()
         self._settings["google_sheets_history"]   = self._history
+        self._settings["font_scale"] = self.font_scale.value()
+        self._settings["high_contrast"] = self.high_contrast.isChecked()
         # Update last_used for the selected sheet
         selected_id = self._selected_sheet_id()
         if selected_id:
@@ -294,5 +221,11 @@ class SettingsDialog(QDialog):
                     entry["last_used"] = str(date.today())
                     break
         save_settings(self._settings)
+        app = QApplication.instance()
+        font = app.font()
+        font.setPointSizeF(10 * self.font_scale.value())
+        app.setFont(font)
+        if self.parent() is not None and hasattr(self.parent(), "refresh_theme"):
+            self.parent().refresh_theme()
         mb_info(self, "Сохранено", "Настройки сохранены.")
         self.accept()

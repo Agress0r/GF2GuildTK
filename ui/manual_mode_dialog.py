@@ -1,104 +1,44 @@
 """
 Manual mode dialog.
 
-Lets the user load screenshots from files or capture them in-app,
+Lets the user load screenshots from files or clipboard,
 then runs badge detection + OCR, shows results in a table,
 and saves them to the database.
 """
 
 from __future__ import annotations
+from ui.controls import AppSpinBox
 
 import io
-import os
-import sys
-import tempfile
+import json
+from pathlib import Path
 
 from PIL import Image
 
-from PyQt6.QtCore import Qt, QThread, QObject, QBuffer, QIODevice, pyqtSignal, QTimer, QProcess
-from PyQt6.QtGui import QPixmap, QImage, QColor, QKeySequence, QShortcut
-from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem,
-    QTextEdit, QSplitter, QWidget, QFileDialog,
-    QHeaderView, QAbstractItemView, QProgressBar, QApplication,
-    QComboBox,
-)
+from PyQt6.QtCore import Qt, QThread, QObject, QBuffer, QIODevice, pyqtSignal
+from PyQt6.QtGui import QColor, QKeySequence, QShortcut
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem, QTextEdit, QSplitter, QWidget, QFileDialog, QHeaderView, QAbstractItemView, QProgressBar, QApplication
+from ui.controls import AppComboBox, ui_scale
 from ui.style_utils import mb_warning, mb_info, mb_question
+from ui.theme import DIALOG_STYLE, style_for, theme_color
 
-from config.settings_manager import get_badge_offsets
-from db.database import save_score, get_season, get_all_player_names_with_lock
+from config.settings_manager import get_badge_offsets, load_settings
+from db.database import import_ocr_scores, get_season, get_scores_for_season
+from core.manual_processor import OcrResult
 
 
 STYLESHEET = """
-QDialog {
-    background: #0a0e17;
-    color: #d0ddf0;
-    font-family: 'Segoe UI', sans-serif;
-}
-QLabel { color: #d0ddf0; font-size: 13px; }
-QLabel#title {
-    font-size: 18px; font-weight: bold;
-    color: #f0c040; padding: 6px 0;
-}
 QLabel#hint {
     font-size: 12px; padding: 5px 10px;
-    border-radius: 5px; background: #131e30;
-    border-left: 3px solid #2a5a9a;
-    color: #8090b0;
+    border-radius: 5px; background: #13141a;
+    border-left: 3px solid #3a2b16;
+    color: #8c8a7e;
 }
-QPushButton {
-    background: #1e2840; color: #c8d8f0;
-    border: 1px solid #2a3a5a; border-radius: 6px;
-    padding: 7px 16px; font-size: 13px;
-}
-QPushButton:hover  { background: #2a3a5a; }
-QPushButton:pressed{ background: #384870; }
-QPushButton#process_btn {
-    background: #1a4a7a; border-color: #3a7abf;
-    color: #fff; font-weight: bold;
-}
-QPushButton#process_btn:hover { background: #2a5a9a; }
-QPushButton#process_btn:disabled { background: #111820; color: #405060; border-color: #1a2030; }
-QPushButton#save_btn {
-    background: #1a4a2a; border-color: #2a7a4a;
-    color: #80ff80; font-weight: bold;
-}
-QPushButton#save_btn:hover { background: #206030; }
-QPushButton#save_btn:disabled { background: #111820; color: #405060; border-color: #1a2030; }
-QPushButton#remove_btn {
-    background: #3a1a1a; color: #ff8080;
-    border-color: #5a2a2a; padding: 4px 10px;
-    font-size: 12px;
-}
-QPushButton#capture_btn {
-    background: #2a1a3a; border-color: #5a3a7a; color: #c0a0e0;
-}
-QListWidget {
-    background: #0f1520; border: 1px solid #1e2a40;
-    border-radius: 4px; color: #a0b8d0; font-size: 12px;
-}
-QListWidget::item:selected { background: #1a2a40; }
-QTableWidget {
-    background: #0d1625; color: #c0d4f0;
-    gridline-color: #162030; border: none; font-size: 13px;
-}
-QHeaderView::section {
-    background: #0d1a2a; color: #7090b0;
-    border: none; border-bottom: 1px solid #1e2a40;
-    padding: 5px 10px; font-size: 12px; font-weight: bold;
-}
-QTableWidget::item { padding: 3px 8px; border-bottom: 1px solid #111a27; }
 QTextEdit {
-    background: #080e18; color: #4a8a4a;
+    background: #0b0c0e; color: #a4a094;
     border: none; font-family: 'Consolas', monospace; font-size: 12px;
     padding: 6px;
 }
-QProgressBar {
-    background: #111a28; border: 1px solid #1e2a40;
-    border-radius: 4px; height: 5px;
-}
-QProgressBar::chunk { background: #2a7a4a; border-radius: 4px; }
 """
 
 
@@ -107,30 +47,58 @@ QProgressBar::chunk { background: #2a7a4a; border-radius: 4px; }
 # ------------------------------------------------------------------ #
 
 class _ProcessWorker(QObject):
-    result_row   = pyqtSignal(str, int)   # name, score
+    result_row   = pyqtSignal(object)
     log_message  = pyqtSignal(str)
+    progress     = pyqtSignal(int, int)
     finished     = pyqtSignal()
 
-    def __init__(self, images: list[Image.Image], offsets: dict):
+    def __init__(self, images: list[Image.Image], offsets):
         super().__init__()
         self.images  = images
         self.offsets = offsets
+        self._cancelled = False
+
+    def stop(self):
+        self._cancelled = True
 
     def run(self):
         from core.manual_processor import process_images
-        results = process_images(
-            self.images,
-            self.offsets,
-            log=self.log_message.emit,
-        )
-        for name, score in results:
-            self.result_row.emit(name, score)
-        self.finished.emit()
+        try:
+            results = process_images(
+                self.images,
+                self.offsets,
+                log=self.log_message.emit,
+                progress=self.progress.emit,
+                should_cancel=lambda: self._cancelled,
+            )
+            for result in results:
+                self.result_row.emit(result)
+        except Exception as exc:
+            self.log_message.emit(f"❌ Обработка прервана: {exc}")
+        finally:
+            self.finished.emit()
 
 
 # ------------------------------------------------------------------ #
 #  Dialog                                                              #
 # ------------------------------------------------------------------ #
+
+class _DropImageList(QListWidget):
+    files_dropped = pyqtSignal(list)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        self.files_dropped.emit([url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()])
+        event.acceptProposedAction()
+
 
 class ManualModeDialog(QDialog):
     def __init__(self, season_id: int, season_name: str, parent=None):
@@ -139,18 +107,26 @@ class ManualModeDialog(QDialog):
         self.season_name = season_name
 
         self.setWindowTitle(f"Ручной режим — {season_name}")
-        self.setStyleSheet(STYLESHEET)
+        self.setStyleSheet(style_for(DIALOG_STYLE + STYLESHEET))
         self.setMinimumSize(1050, 680)
 
         # loaded PIL images, parallel to list widget items
         self._images: list[Image.Image] = []
         # processing results: [(name, score)]
-        self._results: list[tuple[str, int]] = []
+        self._results: list[OcrResult] = []
+        self._db_scores = {row["name"]: row["total_score"] for row in get_scores_for_season(season_id)}
+        self._draft_dir = Path(load_settings()["db_path"]).resolve().parent / "drafts" / f"season_{season_id}"
+        self._restoring = False
+        self._draft_complete = False
+        self._images_dirty = False
 
         self._thread: QThread | None = None
         self._worker: _ProcessWorker | None = None
 
         self._build_ui()
+        self.setAcceptDrops(True)
+        self.result_table.itemChanged.connect(self._on_result_edited)
+        self._restore_draft()
         QShortcut(QKeySequence("Ctrl+V"), self).activated.connect(self._paste_clipboard)
 
     # ---------------------------------------------------------------- #
@@ -168,7 +144,7 @@ class ManualModeDialog(QDialog):
         root.addWidget(title)
 
         hint = QLabel(
-            "Загрузите скриншоты Гильд-таблицы или сделайте их в приложении с помощью инструмента <b>Захват</b>. "
+            "Перетащите готовые скриншоты сюда, откройте файлы или вставьте изображение (Ctrl+V). "
             "Приложение автоматически найдёт бейджи (номер слева от профиля), распознает имена и финальный счёт."
         )
         hint.setObjectName("hint")
@@ -177,7 +153,7 @@ class ManualModeDialog(QDialog):
 
         # Body splitter: left = image list, right = results
         body = QSplitter(Qt.Orientation.Horizontal)
-        body.setStyleSheet("QSplitter::handle { background: #1e2a40; width: 2px; }")
+        body.setStyleSheet(style_for("QSplitter::handle { background: #22242c; width: 2px; }"))
         root.addWidget(body, stretch=1)
 
         body.addWidget(self._build_left_panel())
@@ -196,29 +172,26 @@ class ManualModeDialog(QDialog):
 
         v.addWidget(QLabel("Скриншоты:"))
 
-        self.img_list = QListWidget()
+        self.img_list = _DropImageList()
+        self.img_list.setAcceptDrops(True)
+        self.img_list.files_dropped.connect(self._add_files)
         self.img_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         v.addWidget(self.img_list, stretch=1)
 
         btn_row = QHBoxLayout()
-        load_btn = QPushButton("📂")
+        load_btn = QPushButton("Открыть файлы")
         load_btn.clicked.connect(self._load_files)
-
-        capture_btn = QPushButton("✂ Захват")
-        capture_btn.setObjectName("capture_btn")
-        capture_btn.clicked.connect(self._open_snip)
 
         remove_btn = QPushButton("✕ Удалить")
         remove_btn.setObjectName("remove_btn")
         remove_btn.clicked.connect(self._remove_selected)
 
         btn_row.addWidget(load_btn)
-        btn_row.addWidget(capture_btn)
         v.addLayout(btn_row)
         v.addWidget(remove_btn)
 
         self.img_count_label = QLabel("0 изображений")
-        self.img_count_label.setStyleSheet("color: #4a6a8a; font-size: 12px;")
+        self.img_count_label.setStyleSheet(style_for("color: #8c8a7e; font-size: 12px;"))
         v.addWidget(self.img_count_label)
 
         return panel
@@ -230,12 +203,12 @@ class ManualModeDialog(QDialog):
         v.setSpacing(6)
 
         self.progress = QProgressBar()
-        self.progress.setMaximum(0)
+        self.progress.setMaximum(1)
         self.progress.setVisible(False)
         v.addWidget(self.progress)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setStyleSheet("QSplitter::handle { background: #1e2a40; height: 2px; }")
+        splitter.setStyleSheet(style_for("QSplitter::handle { background: #22242c; height: 2px; }"))
 
         # Results table
         table_widget = QWidget()
@@ -243,13 +216,15 @@ class ManualModeDialog(QDialog):
         tv.setContentsMargins(0, 0, 0, 0)
         tv.setSpacing(0)
         lbl = QLabel("  Результаты:")
-        lbl.setStyleSheet("background: #0f1520; color: #3a5a7a; font-size: 12px; padding: 4px 6px; border-bottom: 1px solid #1e2a40;")
+        lbl.setStyleSheet(style_for("background: #13141a; color: #8c8a7e; font-size: 12px; padding: 4px 6px; border-bottom: 1px solid #22242c;"))
         tv.addWidget(lbl)
 
         self.result_table = QTableWidget()
-        self.result_table.setColumnCount(3)
-        self.result_table.setHorizontalHeaderLabels(["#", "Игрок", "Total Score"])
+        self.result_table.setColumnCount(4)
+        self.result_table.setHorizontalHeaderLabels(["#", "Игрок", "Total Score", "Проверка"])
+        self.result_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.result_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.result_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.result_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.result_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self.result_table.verticalHeader().setVisible(False)
@@ -262,7 +237,7 @@ class ManualModeDialog(QDialog):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(0)
         lbl2 = QLabel("  Журнал обработки:")
-        lbl2.setStyleSheet("background: #0f1520; color: #3a5a7a; font-size: 12px; padding: 4px 6px; border-bottom: 1px solid #1e2a40;")
+        lbl2.setStyleSheet(style_for("background: #13141a; color: #8c8a7e; font-size: 12px; padding: 4px 6px; border-bottom: 1px solid #22242c;"))
         lv.addWidget(lbl2)
         self.log = QTextEdit()
         self.log.setReadOnly(True)
@@ -275,29 +250,34 @@ class ManualModeDialog(QDialog):
 
     def _build_bottom_bar(self) -> QWidget:
         bar = QWidget()
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(0, 4, 0, 0)
+        outer = QVBoxLayout(bar)
+        outer.setContentsMargins(0, 4, 0, 0)
+        h = QHBoxLayout()
 
         self.status_label = QLabel("Загрузите скриншоты и нажмите «Обработать»")
-        self.status_label.setStyleSheet("color: #4a6a8a; font-size: 12px;")
-        h.addWidget(self.status_label, stretch=1)
+        self.status_label.setStyleSheet(style_for("color: #8c8a7e; font-size: 12px;"))
+        self.status_label.setWordWrap(True)
+        outer.addWidget(self.status_label)
+        outer.addLayout(h)
 
         # Day selector
         h.addWidget(QLabel("День:"))
-        self.day_spin = QComboBox()
+        self.day_spin = AppComboBox()
         for d in range(1, 8):
             self.day_spin.addItem(str(d), d)
         self.day_spin.setCurrentIndex(self._suggest_day() - 1)
-        self.day_spin.setFixedWidth(64)
+        self.day_spin.setFixedWidth(round(72 * ui_scale()))
         self.day_spin.setToolTip("День сезона, для которого сохраняются данные (1–7)")
-        self.day_spin.setStyleSheet(
-            "QComboBox { background:#1a2035; color:#d0ddf0; border:1px solid #2a3a5a;"
-            " border-radius:4px; padding:4px 6px; font-size:10pt; }"
-            "QComboBox::drop-down { border: none; }"
-            "QComboBox QAbstractItemView { background:#1a2035; color:#d0ddf0;"
-            " selection-background-color:#2a3a5a; font-size:10pt; }"
-        )
         h.addWidget(self.day_spin)
+
+        h.addWidget(QLabel("Масштаб UI:"))
+        self.scale_spin = AppSpinBox()
+        self.scale_spin.setRange(50, 200)
+        self.scale_spin.setSingleStep(5)
+        self.scale_spin.setValue(100)
+        self.scale_spin.setSuffix("%")
+        self.scale_spin.setToolTip("Масштаб интерфейса игры для выбора профиля калибровки")
+        h.addWidget(self.scale_spin)
 
         calib_btn = QPushButton("🔧 Калибровка смещений")
         calib_btn.clicked.connect(self._open_calibration)
@@ -307,6 +287,11 @@ class ManualModeDialog(QDialog):
         self.process_btn.setObjectName("process_btn")
         self.process_btn.clicked.connect(self._start_processing)
         h.addWidget(self.process_btn)
+
+        self.cancel_btn = QPushButton("Остановить")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._cancel_processing)
+        h.addWidget(self.cancel_btn)
 
         self.save_btn = QPushButton("💾  Сохранить в базу данных")
         self.save_btn.setObjectName("save_btn")
@@ -342,111 +327,34 @@ class ManualModeDialog(QDialog):
             self, "Выберите скриншоты", "",
             "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
         )
+        self._add_files(paths)
+
+    def _add_files(self, paths):
         for path in paths:
             try:
                 img = Image.open(path).convert("RGB")
-                self._add_image(img, path.split("/")[-1].split("\\")[-1])
+                self._add_image(img, Path(path).name)
             except Exception as e:
                 self._log(f"⚠ Не удалось загрузить {path}: {e}")
 
-    def _open_snip(self):
-        print("[DEBUG] _open_snip() called", flush=True)
-        # Не скрываем диалог - пусть overlay появится на top
-        print("[DEBUG] About to call _do_snip() directly", flush=True)
-        self._do_snip()
-
-    def _restore_windows(self):
-        QApplication.instance().setQuitOnLastWindowClosed(True)
-        for w in getattr(self, "_hidden_windows", []):
-            try:
-                w.show()
-            except RuntimeError:
-                pass
-        self._hidden_windows = []
-
-    def _do_snip(self):
-        try:
-            print("[DEBUG] _do_snip() called", flush=True)
-            # Hide all visible app windows so the overlay has a clean desktop
-            self._hidden_windows = [
-                w for w in QApplication.topLevelWidgets() if w.isVisible()
-            ]
-            QApplication.instance().setQuitOnLastWindowClosed(False)
-            for w in self._hidden_windows:
-                w.hide()
-            QApplication.processEvents()  # let the OS repaint before screenshot
-
-            self._snip_tmp = tempfile.mktemp(suffix=".png")
-            script = os.path.join(os.path.dirname(__file__), "snip_proc.py")
-            print(f"[DEBUG] Script path: {script}", flush=True)
-            # Create QProcess WITHOUT parent to prevent destruction
-            self._snip_proc = QProcess()
-            # Set working directory to project root
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            self._snip_proc.setWorkingDirectory(project_root)
-            self._snip_proc.finished.connect(self._snip_finished)
-            self._snip_proc.errorOccurred.connect(self._snip_error)
-            self._log(f"🔧 Запуск snip_proc.py в {project_root}")
-            print(f"[DEBUG] Starting process: {sys.executable} {script} {self._snip_tmp}", flush=True)
-            self._snip_proc.start(sys.executable, [script, self._snip_tmp])
-            if not self._snip_proc.waitForStarted(3000):
-                self.show()
-                self.status_label.setText("⚠ Не удалось запустить snipping tool")
-                self._log("❌ Ошибка: не удалось запустить процесс")
-        except Exception as e:
-            print(f"[ERROR] Exception in _do_snip(): {type(e).__name__}: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            self.show()
-            self.status_label.setText(f"⚠ Внутренняя ошибка: {e}")
-
-    def _snip_finished(self, exit_code: int, _exit_status):
-        self._log(f"📦 snip_proc завершился с кодом {exit_code}")
-        if exit_code == 0 and os.path.exists(self._snip_tmp):
-            try:
-                pil = Image.open(self._snip_tmp).copy()
-                self._log(f"✓ Загружен снимок {pil.width}×{pil.height}")
-                self._restore_windows()
-                self._on_snipped(pil)
-            except Exception as e:
-                self._restore_windows()
-                self.status_label.setText(f"⚠ Ошибка чтения снимка: {e}")
-                self._log(f"❌ Ошибка открытия снимка: {e}")
-            finally:
-                try:
-                    os.unlink(self._snip_tmp)
-                except OSError:
-                    pass
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
         else:
-            self._restore_windows()
-            if exit_code != 0:
-                self._log(f"⚠ Процесс вернул код ошибки {exit_code}")
-                stderr = self._snip_proc.readAllStandardError().data().decode('utf-8', errors='ignore')
-                if stderr:
-                    self._log(f"Ошибка процесса: {stderr}")
-            elif not os.path.exists(self._snip_tmp):
-                self._log(f"⚠ Файл не сохранен: {self._snip_tmp}")
-            try:
-                os.unlink(self._snip_tmp)
-            except OSError:
-                pass
+            event.ignore()
 
-    def _snip_error(self, error):
-        self._restore_windows()
-        error_msg = self._snip_proc.errorString()
-        self.status_label.setText(f"⚠ Ошибка процесса: {error_msg}")
-        self._log(f"❌ Ошибка QProcess: {error_msg}")
-
-    def _on_snipped(self, pil_crop: Image.Image):
-        idx = len(self._images) + 1
-        self._add_image(pil_crop, f"snip_{idx}.png")
-        self.status_label.setText("Область добавлена.")
+    def dropEvent(self, event):
+        self._add_files([url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()])
+        event.acceptProposedAction()
 
     def _add_image(self, img: Image.Image, label: str):
         self._images.append(img)
+        self._images_dirty = True
         item = QListWidgetItem(f"🖼  {label}  ({img.width}×{img.height})")
+        item.setData(Qt.ItemDataRole.UserRole, label)
         self.img_list.addItem(item)
         self._update_img_count()
+        self._save_draft()
 
     def _paste_clipboard(self):
         clipboard = QApplication.clipboard()
@@ -471,7 +379,9 @@ class ManualModeDialog(QDialog):
         for r in rows:
             self.img_list.takeItem(r)
             self._images.pop(r)
+        self._images_dirty = True
         self._update_img_count()
+        self._save_draft()
 
     def _update_img_count(self):
         n = len(self._images)
@@ -486,10 +396,13 @@ class ManualModeDialog(QDialog):
             mb_warning(self, "Нет изображений", "Загрузите хотя бы один скриншот.")
             return
 
-        offsets = get_badge_offsets()
-        if not offsets:
+        scale = self.scale_spin.value()
+        missing = [image.size for image in self._images
+                   if not get_badge_offsets(image.width, image.height, scale)]
+        if missing:
             if mb_question(self, "Нет калибровки",
-                           "Калибровка смещений не настроена.\nОткрыть калибровку?"):
+                           f"Нет профиля для {missing[0][0]}×{missing[0][1]} при {scale}%.\n"
+                           "Открыть калибровку?"):
                 self._open_calibration()
             return
 
@@ -498,37 +411,80 @@ class ManualModeDialog(QDialog):
         self.log.clear()
         self.save_btn.setEnabled(False)
         self.process_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
         self.progress.setVisible(True)
+        self.progress.setMaximum(len(self._images))
+        self.progress.setValue(0)
         self.status_label.setText("Обработка…")
 
-        self._worker = _ProcessWorker(list(self._images), offsets)
+        self._worker = _ProcessWorker(
+            list(self._images),
+            lambda image: get_badge_offsets(image.width, image.height, scale),
+        )
         self._thread = QThread()
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.result_row.connect(self._on_result_row)
         self._worker.log_message.connect(self._log)
+        self._worker.progress.connect(lambda done, total: self.progress.setValue(done))
         self._worker.finished.connect(self._on_finished)
+        self._worker.finished.connect(self._thread.quit, Qt.ConnectionType.DirectConnection)
         self._thread.start()
 
-    def _on_result_row(self, name: str, score: int):
-        self._results.append((name, score))
+    def _cancel_processing(self):
+        if self._worker:
+            self._worker.stop()
+            self.status_label.setText("Останавливаю обработку…")
+            self.cancel_btn.setEnabled(False)
+
+    def _on_result_row(self, result: OcrResult):
+        self._restoring = True
+        self._results.append(result)
         row = self.result_table.rowCount()
         self.result_table.insertRow(row)
         _ro = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
         rank_item = QTableWidgetItem(str(row + 1))
         rank_item.setFlags(_ro)
-        name_item = QTableWidgetItem(name)
-        score_item = QTableWidgetItem(f"{score:,}")
-        score_item.setFlags(_ro)
+        name_item = QTableWidgetItem(result.name)
+        score_item = QTableWidgetItem(f"{result.score:,}")
         score_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.result_table.setItem(row, 0, rank_item)
         self.result_table.setItem(row, 1, name_item)
         self.result_table.setItem(row, 2, score_item)
+        warnings = []
+        if result.confidence < 0.72:
+            warnings.append(f"OCR {result.confidence:.0%}")
+        if result.occurrences > 1:
+            warnings.append(f"Дубль ×{result.occurrences}")
+        previous = self._db_scores.get(result.name)
+        if previous is not None and result.score > max(previous * 2, previous + 100_000):
+            warnings.append(f"Скачок с {previous:,}")
+        review = QTableWidgetItem(" · ".join(warnings) if warnings else "✓ Проверено")
+        review.setFlags(_ro)
+        if warnings:
+            review.setForeground(theme_color(QColor("#e8b84b")))
+            review.setBackground(theme_color(QColor("#332919")))
+            review.setToolTip("Проверьте имя и счёт перед сохранением")
+        self.result_table.setItem(row, 3, review)
         self.result_table.scrollToBottom()
+        self._restoring = False
+        self._save_draft()
+
+    def _on_result_edited(self, item: QTableWidgetItem):
+        if self._restoring or item.column() not in (1, 2):
+            return
+        status = self.result_table.item(item.row(), 3)
+        if status:
+            self._restoring = True
+            status.setText("Исправлено вручную")
+            status.setForeground(theme_color(QColor("#9ad7aa")))
+            self._restoring = False
+        self._save_draft()
 
     def _on_finished(self):
         self.progress.setVisible(False)
         self.process_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
         n = len(self._results)
         self.status_label.setText(f"Готово — найдено {n} игрок{'а' if 2 <= n <= 4 else 'ов' if n != 1 else ''}")
         if n > 0:
@@ -545,21 +501,28 @@ class ManualModeDialog(QDialog):
         if not self._results:
             return
 
+        flagged = sum(1 for row in range(self.result_table.rowCount())
+                      if self.result_table.item(row, 3).text() != "✓ Проверено")
+        if flagged and not mb_question(
+            self, "Проверка OCR", f"Есть {flagged} записей с предупреждениями. Вы проверили их?"
+        ):
+            return
         day_number = self.day_spin.currentData()
-        existing_players = get_all_player_names_with_lock()
-        saved = 0
-        for rank, (_, score) in enumerate(self._results, start=1):
-            name = (self.result_table.item(rank - 1, 1) or QTableWidgetItem("")).text().strip()
-            if not name:
-                self._log(f"⚠ Строка {rank}: пустое имя — пропуск")
-                continue
-            try:
-                save_score(self.season_id, name, score, rank,
-                           day_number=day_number,
-                           existing_players=existing_players)
-                saved += 1
-            except Exception as e:
-                self._log(f"❌ Ошибка сохранения {name!r}: {e}")
+        rows = []
+        try:
+            for rank, _ in enumerate(self._results, start=1):
+                name = (self.result_table.item(rank - 1, 1) or QTableWidgetItem("")).text().strip()
+                raw = self.result_table.item(rank - 1, 2).text()
+                score = int(raw.replace(",", "").replace(" ", ""))
+                rows.append((name, score))
+            saved = import_ocr_scores(self.season_id, day_number, rows)
+        except Exception as exc:
+            mb_warning(self, "Ошибка сохранения", str(exc))
+            return
+
+        if saved == len(self._results):
+            self._draft_complete = True
+            self._clear_draft()
 
         self.status_label.setText(f"Сохранено {saved}/{len(self._results)} записей в сезон «{self.season_name}»")
         self._log(f"\n💾 Сохранено в БД: {saved} игроков")
@@ -584,3 +547,87 @@ class ManualModeDialog(QDialog):
 
     def _log(self, text: str):
         self.log.append(text)
+
+    def _save_draft(self):
+        if self._restoring or self._draft_complete:
+            return
+        if not self._images and not self._results:
+            self._clear_draft()
+            return
+        self._draft_dir.mkdir(parents=True, exist_ok=True)
+        images = []
+        for index, image in enumerate(self._images):
+            name = f"image_{index:03d}.png"
+            target = self._draft_dir / name
+            if self._images_dirty or not target.exists():
+                image.save(target, format="PNG")
+            images.append({"file": name,
+                           "label": self.img_list.item(index).data(Qt.ItemDataRole.UserRole)})
+        keep = {entry["file"] for entry in images}
+        for stale in self._draft_dir.glob("image_*.png"):
+            if stale.name not in keep:
+                stale.unlink()
+        self._images_dirty = False
+        results = []
+        for index, result in enumerate(self._results):
+            results.append({
+                "name": self.result_table.item(index, 1).text(),
+                "score": self.result_table.item(index, 2).text(),
+                "confidence": result.confidence,
+                "occurrences": result.occurrences,
+                "score_variants": sorted(result.score_variants),
+                "status": self.result_table.item(index, 3).text(),
+            })
+        payload = {"images": images, "results": results,
+                   "day": self.day_spin.currentData(), "scale": self.scale_spin.value()}
+        temp = self._draft_dir / "draft.tmp"
+        temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temp.replace(self._draft_dir / "draft.json")
+
+    def _restore_draft(self):
+        path = self._draft_dir / "draft.json"
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self._restoring = True
+            self.day_spin.setCurrentIndex(max(0, min(6, int(data.get("day", 1)) - 1)))
+            self.scale_spin.setValue(int(data.get("scale", 100)))
+            for entry in data.get("images", []):
+                image = Image.open(self._draft_dir / entry["file"]).convert("RGB")
+                self._add_image(image, entry["label"])
+            self._images_dirty = False
+            self._restoring = False
+            for entry in data.get("results", []):
+                result = OcrResult(
+                    entry["name"], int(entry["score"].replace(",", "").replace(" ", "")),
+                    float(entry["confidence"]), int(entry["occurrences"]),
+                    set(entry.get("score_variants", [])),
+                )
+                self._on_result_row(result)
+                self.result_table.item(self.result_table.rowCount() - 1, 3).setText(entry["status"])
+            self.save_btn.setEnabled(bool(self._results))
+            self.status_label.setText("Незавершённый черновик восстановлен.")
+        except Exception as exc:
+            self._restoring = False
+            self.status_label.setText(f"Не удалось восстановить черновик: {exc}")
+
+    def _clear_draft(self):
+        if not self._draft_dir.exists():
+            return
+        for path in self._draft_dir.iterdir():
+            if path.is_file() and (path.name in {"draft.json", "draft.tmp"} or
+                                   path.name.startswith("image_") and path.suffix == ".png"):
+                path.unlink()
+        try:
+            self._draft_dir.rmdir()
+        except OSError:
+            pass
+
+    def closeEvent(self, event):
+        if self._thread and self._thread.isRunning():
+            self._worker.stop()
+            self._thread.quit()
+            self._thread.wait()
+        self._save_draft()
+        super().closeEvent(event)

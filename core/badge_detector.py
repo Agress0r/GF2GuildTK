@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 from pathlib import Path
+import sys
 from PIL import Image
 
 try:
@@ -25,7 +26,8 @@ except ImportError:
 # Badge templates are saved at 3× original resolution
 TEMPLATE_SCALE = 1 / 3.0
 
-TEMPLATES_DIR = Path("assets/badges")
+_BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+TEMPLATES_DIR = _BUNDLE_ROOT / "assets" / "badges"
 TEMPLATE_NAMES = ["B1Gold", "B2Silver", "B3Bronze", "B4Default"]
 
 
@@ -35,7 +37,7 @@ TEMPLATE_NAMES = ["B1Gold", "B2Silver", "B3Bronze", "B4Default"]
 
 def load_templates() -> list[np.ndarray]:
     """
-    Load badge templates from debug_crops/, scale them down to original size.
+    Load badge templates from assets/badges/, scale them down to original size.
     Returns list of BGR numpy arrays ready for cv2.matchTemplate.
     """
     if not _CV2_AVAILABLE:

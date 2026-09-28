@@ -1,27 +1,28 @@
 import json
-import os
+import sys
 from pathlib import Path
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "settings.json"
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+CONFIG_PATH = APP_DIR / "settings.json" if getattr(sys, "frozen", False) else APP_DIR / "config" / "settings.json"
 
 DEFAULT_SETTINGS = {
-    "scroll_pause": 1.2,
-    "scroll_amount": 3,
-    "ticks_per_row": 5,
-    "countdown_seconds": 5,
-    "db_path": str(Path(__file__).parent.parent / "guild_tracker.db"),
+    "db_path": str(APP_DIR / "guild_tracker.db"),
     "google_sheets_id": "",
     "google_credentials_path": "",
     "google_sheets_history": [],  # list of {"id": str, "name": str, "last_used": str}
-    "roi_profiles": {}
+    "google_worksheet_ids": {},  # spreadsheet ID -> last selected worksheet ID
+    "font_scale": 1.0,
+    "high_contrast": False,
 }
 
 
 def _sanitize_paths(settings: dict) -> dict:
-    """Сбрасывает абсолютные пути к несуществующим файлам на дефолтные.
-    Предотвращает поломку при копировании settings.json с другой машины."""
+    """Сбрасывает отсутствующий ключ Google; путь новой БД сохраняется.
+
+    Несуществующая БД создаётся по выбранному пути. Подмена этого пути
+    основной базой опасна: импорт попадёт в другой файл.
+    """
     path_fields = {
-        "db_path": DEFAULT_SETTINGS["db_path"],
         "google_credentials_path": DEFAULT_SETTINGS["google_credentials_path"],
     }
     for field, default in path_fields.items():
@@ -52,28 +53,32 @@ def save_settings(settings: dict):
         json.dump(settings, f, indent=2, ensure_ascii=False)
 
 
-def get_roi_for_resolution(width: int, height: int) -> dict | None:
-    settings = load_settings()
-    key = f"{width}x{height}"
-    return settings.get("roi_profiles", {}).get(key)
+def _profile_key(width: int, height: int, scale: int) -> str:
+    return f"{width}x{height}@{scale}"
 
 
-def save_roi_for_resolution(width: int, height: int, roi: dict):
+def get_badge_offsets(width: int | None = None, height: int | None = None,
+                      scale: int = 100) -> dict | None:
+    """Get offsets for image resolution and game UI scale, with legacy fallback."""
     settings = load_settings()
-    key = f"{width}x{height}"
-    if "roi_profiles" not in settings:
-        settings["roi_profiles"] = {}
-    settings["roi_profiles"][key] = roi
+    if width is not None and height is not None:
+        key = _profile_key(width, height, scale)
+        profiles = settings.get("badge_profiles", {})
+        if profiles:
+            return profiles.get(key)
+    return settings.get("badge_offsets")
+
+
+def save_badge_offsets(offsets: dict, width: int | None = None,
+                       height: int | None = None, scale: int = 100):
+    """Persist calibration for a resolution and UI scale."""
+    settings = load_settings()
+    if width is not None and height is not None:
+        settings.setdefault("badge_profiles", {})[_profile_key(width, height, scale)] = offsets
+    else:
+        settings["badge_offsets"] = offsets
     save_settings(settings)
 
 
-def get_badge_offsets() -> dict | None:
-    """Return saved badge offset calibration or None if not calibrated."""
-    return load_settings().get("badge_offsets")
-
-
-def save_badge_offsets(offsets: dict):
-    """Save badge offset calibration (name/score offsets relative to badge top-left)."""
-    settings = load_settings()
-    settings["badge_offsets"] = offsets
-    save_settings(settings)
+def list_badge_profiles() -> list[str]:
+    return sorted(load_settings().get("badge_profiles", {}))

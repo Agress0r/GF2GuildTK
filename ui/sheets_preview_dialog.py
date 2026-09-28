@@ -9,60 +9,31 @@ from __future__ import annotations
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QFrame, QScrollArea, QWidget,
+    QPushButton, QTableWidget, QTableWidgetItem, QLineEdit, QCheckBox,
+    QHeaderView, QAbstractItemView, QFrame, QApplication,
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QColor
 
 from core.sheets_sync import SyncPreview
+from ui.controls import ComparisonChoice, ui_scale
+from ui.theme import DIALOG_STYLE, style_for, theme_color
 
 
-STYLESHEET = """
-QDialog { background: #0a0e17; color: #d0ddf0; font-family: 'Segoe UI', sans-serif; }
-
-QLabel#title { font-size: 17px; font-weight: bold; color: #f0c040; padding: 4px 0; }
-QLabel#stats { font-size: 12px; color: #8aabcf; padding: 4px 0; }
-QLabel#warn  { font-size: 12px; color: #f08080; padding: 4px 0; }
-
-QTableWidget {
-    background: #0d1625; color: #d0ddf0;
-    border: 1px solid #162030; gridline-color: #162030;
-    font-size: 12px;
-}
-QTableWidget::item { padding: 3px 6px; }
-QHeaderView::section {
-    background: #0d1a2a; color: #8aabcf;
-    border: none; border-right: 1px solid #162030;
-    border-bottom: 1px solid #162030;
-    padding: 4px 6px; font-size: 12px;
-}
-QScrollBar:vertical { background: #0a0e17; width: 8px; }
-QScrollBar::handle:vertical { background: #2a3a5a; border-radius: 4px; }
-
-QPushButton {
-    background: #1e2840; color: #c8d8f0; border: 1px solid #2a3a5a;
-    border-radius: 6px; padding: 7px 18px; font-size: 13px;
-}
-QPushButton:hover { background: #2a3a5a; }
-QPushButton#primary {
-    background: #1a4a7a; border-color: #3a7abf; color: #fff; font-weight: bold;
-}
-QPushButton#primary:hover { background: #2a5a9a; }
-
-QFrame#divider { background: #162030; }
+STYLESHEET = DIALOG_STYLE + """
+QTableWidget { font-size: 12px; }
+QTableWidget::item { padding: 5px 7px; }
+QHeaderView::section { padding: 8px 7px; font-size: 11px; }
+QScrollBar:vertical { background: #0b0c0e; width: 8px; }
+QScrollBar::handle:vertical { background: #353840; border-radius: 2px; }
 """
 
 # Cell colors
-BG_CHANGED_UP   = QColor("#2a2a0f")   # value increases  → amber bg
-BG_CHANGED_DOWN = QColor("#2a0f0f")   # value decreases  → red bg
-FG_CHANGED_UP   = QColor("#f0c040")
-FG_CHANGED_DOWN = QColor("#f08080")
-FG_UNCHANGED    = QColor("#8aabcf")
-BG_STATUS_YES   = QColor("#1a3a1a")
-FG_STATUS_YES   = QColor("#80d080")
-BG_STATUS_NO    = QColor("#1a2030")
-FG_STATUS_NO    = QColor("#8aabcf")
+FG_UNCHANGED    = QColor("#a4a094")
+BG_STATUS_YES   = QColor("#1f3027")
+FG_STATUS_YES   = QColor("#9ad7aa")
+BG_STATUS_NO    = QColor("#1d1f24")
+FG_STATUS_NO    = QColor("#a4a094")
 
 
 def _fmt(v: int | str) -> str:
@@ -78,9 +49,10 @@ class SheetsPreviewDialog(QDialog):
         super().__init__(parent)
         self._preview = preview
         self.setWindowTitle("Предпросмотр синхронизации — Google Sheets")
-        self.setStyleSheet(STYLESHEET)
-        self.setMinimumSize(900, 560)
-        self.resize(1000, 620)
+        self.setStyleSheet(style_for(STYLESHEET))
+        self.setMinimumSize(980, 560)
+        screen = QApplication.primaryScreen()
+        self.resize(max(980, min(1680, screen.availableGeometry().width() - 60)), 720)
         self._build_ui()
 
     def _build_ui(self):
@@ -89,29 +61,53 @@ class SheetsPreviewDialog(QDialog):
         layout.setSpacing(10)
 
         # Title
-        title = QLabel("Предпросмотр синхронизации")
+        eyebrow = QLabel("GOOGLE SHEETS  /  ЭКСПОРТ")
+        eyebrow.setObjectName("eyebrow")
+        layout.addWidget(eyebrow)
+        title = QLabel("Изменения перед отправкой")
         title.setObjectName("title")
         layout.addWidget(title)
 
         # Stats row
         p = self._preview
+        source = QLabel(f"Лист: {p.worksheet_title or 'выбранный лист'}")
+        source.setObjectName("info")
+        layout.addWidget(source)
         n_changed  = p.changed_count
         n_same     = p.matched_count - n_changed
         n_unmatched = len(p.unmatched_sheet)
-        stats = QLabel(
+        self._stats = QLabel(
             f"Совпало: {p.matched_count}  |  "
             f"Изменится: {n_changed}  |  "
             f"Без изменений: {n_same}  |  "
             f"Не найдено в БД: {n_unmatched}"
         )
-        stats.setObjectName("stats")
-        layout.addWidget(stats)
+        self._stats.setObjectName("stats")
+        stats_card = QFrame()
+        stats_card.setObjectName("summary_card")
+        stats_layout = QVBoxLayout(stats_card)
+        stats_layout.addWidget(self._stats)
+        layout.addWidget(stats_card)
+        info = QLabel("Для каждой спорной ячейки можно отправить значение БД или сохранить значение таблицы.")
+        info.setObjectName("info")
+        layout.addWidget(info)
 
         # Divider
         div = QFrame()
         div.setObjectName("divider")
         div.setFixedHeight(1)
         layout.addWidget(div)
+
+        filters = QHBoxLayout()
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Найти игрока…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._filter_rows)
+        self._changes_only = QCheckBox("Только изменения")
+        self._changes_only.stateChanged.connect(self._filter_rows)
+        filters.addWidget(self._search, stretch=1)
+        filters.addWidget(self._changes_only)
+        layout.addLayout(filters)
 
         # Main diff table
         self._table = QTableWidget()
@@ -122,13 +118,16 @@ class SheetsPreviewDialog(QDialog):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
+        self._table.verticalHeader().setDefaultSectionSize(40)
         hdr = self._table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         for col in range(1, 8):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
-            self._table.setColumnWidth(col, 110)
+            self._table.setColumnWidth(col, round(205 * ui_scale()))
         hdr.setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(8, 110)
+        self._table.setColumnWidth(8, 145)
 
         self._populate_table()
         layout.addWidget(self._table, stretch=1)
@@ -150,9 +149,10 @@ class SheetsPreviewDialog(QDialog):
         cancel_btn = QPushButton("Отмена")
         cancel_btn.clicked.connect(self.reject)
 
-        sync_label = f"Синхронизировать {p.matched_count} игроков"
+        sync_label = f"Экспортировать {p.changed_count} игроков"
         self._sync_btn = QPushButton(sync_label)
         self._sync_btn.setObjectName("primary")
+        self._sync_btn.setEnabled(p.changed_count > 0)
         self._sync_btn.clicked.connect(self.accept)
 
         btn_row.addStretch()
@@ -167,7 +167,7 @@ class SheetsPreviewDialog(QDialog):
         for row_idx, diff in enumerate(diffs):
             # Name column
             name_item = QTableWidgetItem(diff.sheet_name)
-            name_item.setForeground(QColor("#d0ddf0"))
+            name_item.setForeground(theme_color(QColor("#ece8dc")))
             if diff.db_name and diff.db_name != diff.sheet_name:
                 name_item.setToolTip(f"БД: {diff.db_name}")
             self._table.setItem(row_idx, 0, name_item)
@@ -178,42 +178,68 @@ class SheetsPreviewDialog(QDialog):
                 cur_str  = diff.current.get(day_num, "")
                 new_val  = diff.proposed.get(day_num, 0)
 
-                try:
-                    cur_int = int(cur_str) if cur_str else 0
-                except ValueError:
-                    cur_int = 0
-
                 changed = str(new_val) != cur_str
 
                 if changed:
-                    if new_val > cur_int:
-                        text   = f"{_fmt(cur_int)} → {_fmt(new_val)}"
-                        fg_col = FG_CHANGED_UP
-                        bg_col = BG_CHANGED_UP
-                    else:
-                        text   = f"{_fmt(cur_int)} → {_fmt(new_val)}"
-                        fg_col = FG_CHANGED_DOWN
-                        bg_col = BG_CHANGED_DOWN
-                    item = QTableWidgetItem(text)
-                    item.setForeground(fg_col)
-                    item.setBackground(bg_col)
-                else:
-                    item = QTableWidgetItem(_fmt(new_val) if new_val else "0")
-                    item.setForeground(FG_UNCHANGED)
+                    choice = ComparisonChoice(
+                        ("db", "БД", _fmt(new_val)),
+                        ("sheet", "Таблица", _fmt(cur_str) if cur_str else "—"),
+                        diff.choices.get(day_num, "db"),
+                    )
+                    choice.setToolTip(f"День {day_num}: выберите значение для Google Таблицы")
+                    choice.changed.connect(
+                        lambda source, d=diff, day=day_num: self._select_cell(d, day, source)
+                    )
+                    self._table.setCellWidget(row_idx, col, choice)
+                    continue
+
+                item = QTableWidgetItem(_fmt(new_val) if new_val else "0")
+                item.setForeground(theme_color(FG_UNCHANGED))
 
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._table.setItem(row_idx, col, item)
 
             # Status column
-            if diff.has_changes:
+            if diff.selected_changes():
                 status_item = QTableWidgetItem("✓ Обновится")
-                status_item.setForeground(FG_STATUS_YES)
-                status_item.setBackground(BG_STATUS_YES)
+                status_item.setForeground(theme_color(FG_STATUS_YES))
+                status_item.setBackground(theme_color(BG_STATUS_YES))
             else:
                 status_item = QTableWidgetItem("= Совпадает")
-                status_item.setForeground(FG_STATUS_NO)
-                status_item.setBackground(BG_STATUS_NO)
+                status_item.setForeground(theme_color(FG_STATUS_NO))
+                status_item.setBackground(theme_color(BG_STATUS_NO))
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._table.setItem(row_idx, 8, status_item)
+            self._table.setRowHeight(
+                row_idx,
+                round((78 if any(self._table.cellWidget(row_idx, col)
+                                 for col in range(1, 8)) else 40) * ui_scale()),
+            )
 
-        self._table.resizeRowsToContents()
+    def _select_cell(self, diff, day: int, source: str):
+        diff.choices[day] = source
+        row = next((index for index, item in enumerate(self._preview.diffs) if item is diff), None)
+        if row is not None:
+            status = self._table.item(row, 8)
+            if status:
+                status.setText("✓ Обновится" if diff.selected_changes() else "= Оставить таблицу")
+                status.setForeground(FG_STATUS_YES if diff.selected_changes() else FG_STATUS_NO)
+                status.setBackground(BG_STATUS_YES if diff.selected_changes() else BG_STATUS_NO)
+        changed = self._preview.changed_count
+        self._stats.setText(
+            f"Совпало: {self._preview.matched_count}  |  Изменится: {changed}  |  "
+            f"Без изменений: {self._preview.matched_count - changed}  |  "
+            f"Не найдено в БД: {len(self._preview.unmatched_sheet)}"
+        )
+        self._sync_btn.setText(f"Экспортировать {changed} игроков")
+        self._sync_btn.setEnabled(changed > 0)
+        self._filter_rows()
+
+    def _filter_rows(self, *_):
+        query = self._search.text().strip().casefold()
+        changed_only = self._changes_only.isChecked()
+        for row, diff in enumerate(self._preview.diffs):
+            hidden = (query and query not in diff.sheet_name.casefold()) or (
+                changed_only and not diff.selected_changes()
+            )
+            self._table.setRowHidden(row, bool(hidden))

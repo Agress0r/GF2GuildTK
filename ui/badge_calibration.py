@@ -2,7 +2,7 @@
 Badge offset calibration dialog.
 
 Flow:
-1. User loads a screenshot (or the app captures one).
+1. User loads a screenshot from a file or clipboard.
 2. Screenshot is shown scaled inside the dialog.
 3. Three steps guided by hint bar:
    Step 1 — Draw rectangle around the BADGE of any one player row.
@@ -17,11 +17,8 @@ Flow:
 from __future__ import annotations
 
 import io
-import os
-import sys
-import tempfile
 
-from PyQt6.QtCore import Qt, QRect, QPoint, QBuffer, QIODevice, QTimer, pyqtSignal, QProcess
+from PyQt6.QtCore import Qt, QRect, QPoint, QBuffer, QIODevice, pyqtSignal
 from PyQt6.QtGui import (
     QPixmap, QPainter, QPen, QColor, QFont, QBrush, QImage,
     QKeySequence, QShortcut
@@ -31,6 +28,8 @@ from PyQt6.QtWidgets import (
     QWidget, QSizePolicy, QFileDialog, QApplication
 )
 from ui.style_utils import mb_warning, mb_info
+from ui.controls import AppSpinBox
+from ui.theme import DIALOG_STYLE, style_for
 from PIL import Image
 
 from config.settings_manager import save_badge_offsets, get_badge_offsets
@@ -47,38 +46,11 @@ STEPS = [
 ]
 
 STYLESHEET = """
-QDialog {
-    background: #0a0e17;
-    color: #d0ddf0;
-    font-family: 'Segoe UI', sans-serif;
-}
-QLabel { color: #d0ddf0; font-size: 13px; }
-QLabel#title {
-    font-size: 18px; font-weight: bold;
-    color: #f0c040; padding: 8px 0;
-}
 QLabel#hint {
     font-size: 13px; padding: 6px 12px;
-    border-radius: 6px; background: #1a2035;
-    border-left: 3px solid #f0c040;
+    border-radius: 6px; background: #17181d;
+    border-left: 3px solid #e8b84b;
 }
-QPushButton {
-    background: #1e2840; color: #c8d8f0;
-    border: 1px solid #2a3a5a; border-radius: 6px;
-    padding: 7px 18px; font-size: 13px;
-}
-QPushButton:hover  { background: #2a3a5a; }
-QPushButton:pressed{ background: #384870; }
-QPushButton#primary {
-    background: #1a4a7a; border-color: #3a7abf;
-    color: #ffffff; font-weight: bold;
-}
-QPushButton#primary:hover { background: #2a5a9a; }
-QPushButton#preview_btn {
-    background: #1a3a2a; border-color: #2a6a4a;
-    color: #80e0a0;
-}
-QPushButton#preview_btn:hover { background: #204a30; }
 """
 
 
@@ -217,7 +189,7 @@ class BadgeOffsetCalibrationDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Калибровка смещений бейджа — Guild Tracker")
-        self.setStyleSheet(STYLESHEET)
+        self.setStyleSheet(style_for(DIALOG_STYLE + STYLESHEET))
         self.setMinimumSize(1000, 700)
 
         self._rects: dict[str, QRect] = {}
@@ -225,6 +197,9 @@ class BadgeOffsetCalibrationDialog(QDialog):
         self.canvas: _CalibCanvas | None = None
 
         self._build_ui()
+        self.ensurePolished()
+        for button in self.findChildren(QPushButton):
+            button.setMinimumWidth(button.sizeHint().width())
         QShortcut(QKeySequence("Ctrl+V"), self).activated.connect(self._paste_clipboard)
 
     # ---------------------------------------------------------------- #
@@ -245,8 +220,21 @@ class BadgeOffsetCalibrationDialog(QDialog):
             "Приложение вычислит смещения и будет находить данные для всех бейджей автоматически."
         )
         desc.setWordWrap(True)
-        desc.setStyleSheet("color: #8090a0; font-size: 12px;")
+        desc.setStyleSheet(style_for("color: #a4a094; font-size: 12px;"))
         layout.addWidget(desc)
+
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel("Масштаб интерфейса игры:"))
+        self.scale_spin = AppSpinBox()
+        self.scale_spin.setRange(50, 200)
+        self.scale_spin.setSingleStep(5)
+        self.scale_spin.setValue(100)
+        self.scale_spin.setSuffix("%")
+        profile_row.addWidget(self.scale_spin)
+        self.profile_label = QLabel("Профиль: загрузите изображение")
+        profile_row.addWidget(self.profile_label, stretch=1)
+        layout.addLayout(profile_row)
+        self.scale_spin.valueChanged.connect(self._update_profile_label)
 
         self.hint_label = QLabel("Загрузите скриншот для начала калибровки.")
         self.hint_label.setObjectName("hint")
@@ -256,18 +244,15 @@ class BadgeOffsetCalibrationDialog(QDialog):
         # Canvas placeholder
         self.canvas_placeholder = QLabel("Нет изображения — используйте кнопки ниже")
         self.canvas_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.canvas_placeholder.setStyleSheet("background:#141920; border-radius:8px; color:#3a5a7a;")
+        self.canvas_placeholder.setStyleSheet(style_for("background:#13141a; border-radius:8px; color:#8c8a7e;"))
         self.canvas_placeholder.setMinimumHeight(400)
         layout.addWidget(self.canvas_placeholder, stretch=1)
 
         # Buttons
         btn_row = QHBoxLayout()
 
-        load_btn = QPushButton("📂")
+        load_btn = QPushButton("Открыть изображение")
         load_btn.clicked.connect(self._load_file)
-
-        capture_btn = QPushButton("✂ Захват")
-        capture_btn.clicked.connect(self._open_snip)
 
         self.reset_btn = QPushButton("↩  Сбросить зоны")
         self.reset_btn.clicked.connect(self._reset)
@@ -282,7 +267,6 @@ class BadgeOffsetCalibrationDialog(QDialog):
         self.save_btn.clicked.connect(self._save)
 
         btn_row.addWidget(load_btn)
-        btn_row.addWidget(capture_btn)
         btn_row.addWidget(self.reset_btn)
         btn_row.addStretch()
         btn_row.addWidget(self.preview_btn)
@@ -314,90 +298,9 @@ class BadgeOffsetCalibrationDialog(QDialog):
         pil = Image.open(io.BytesIO(bytes(buf.data()))).convert("RGB")
         self._set_image(pil)
 
-    def _open_snip(self):
-        print("[DEBUG] Badge calib: _open_snip() called", flush=True)
-        # Не скрываем диалог - пусть overlay появится на top
-        print("[DEBUG] Badge calib: About to call _do_snip() directly", flush=True)
-        self._do_snip()
-
-    def _restore_windows(self):
-        QApplication.instance().setQuitOnLastWindowClosed(True)
-        for w in getattr(self, "_hidden_windows", []):
-            try:
-                w.show()
-            except RuntimeError:
-                pass
-        self._hidden_windows = []
-
-    def _do_snip(self):
-        try:
-            print("[DEBUG] Badge calib: _do_snip() called", flush=True)
-            # Hide all visible app windows so the overlay has a clean desktop
-            self._hidden_windows = [
-                w for w in QApplication.topLevelWidgets() if w.isVisible()
-            ]
-            QApplication.instance().setQuitOnLastWindowClosed(False)
-            for w in self._hidden_windows:
-                w.hide()
-            QApplication.processEvents()  # let the OS repaint before screenshot
-
-            self._snip_tmp = tempfile.mktemp(suffix=".png")
-            script = os.path.join(os.path.dirname(__file__), "snip_proc.py")
-            print(f"[DEBUG] Badge calib: Script path: {script}", flush=True)
-            # Create QProcess WITHOUT parent to prevent destruction
-            self._snip_proc = QProcess()
-            # Set working directory to project root
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            self._snip_proc.setWorkingDirectory(project_root)
-            self._snip_proc.finished.connect(self._snip_finished)
-            self._snip_proc.errorOccurred.connect(self._snip_error)
-            self.hint_label.setText(f"🔧 Запуск snipping tool...")
-            print(f"[DEBUG] Badge calib: Starting process: {sys.executable} {script} {self._snip_tmp}", flush=True)
-            self._snip_proc.start(sys.executable, [script, self._snip_tmp])
-            if not self._snip_proc.waitForStarted(3000):
-                self.show()
-                self.hint_label.setText("⚠ Не удалось запустить snipping tool")
-        except Exception as e:
-            print(f"[ERROR] Badge calib: Exception in _do_snip(): {type(e).__name__}: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            self.show()
-            self.hint_label.setText(f"⚠ Внутренняя ошибка: {e}")
-
-    def _snip_finished(self, exit_code: int, _exit_status):
-        if exit_code == 0 and os.path.exists(self._snip_tmp):
-            try:
-                pil = Image.open(self._snip_tmp).copy()
-                self._restore_windows()
-                self._on_snipped(pil)
-            except Exception as e:
-                self._restore_windows()
-                self.hint_label.setText(f"⚠ Ошибка чтения снимка: {e}")
-            finally:
-                try:
-                    os.unlink(self._snip_tmp)
-                except OSError:
-                    pass
-        else:
-            self._restore_windows()
-            if exit_code != 0:
-                stderr = self._snip_proc.readAllStandardError().data().decode('utf-8', errors='ignore')
-                self.hint_label.setText(f"⚠ Процесс вернул ошибку: {stderr if stderr else 'неизвестная ошибка'}")
-            try:
-                os.unlink(self._snip_tmp)
-            except OSError:
-                pass
-
-    def _snip_error(self, error):
-        self._restore_windows()
-        error_msg = self._snip_proc.errorString()
-        self.hint_label.setText(f"⚠ Ошибка процесса: {error_msg}")
-
-    def _on_snipped(self, pil_crop: Image.Image):
-        self._set_image(pil_crop)
-
     def _set_image(self, pil_img: Image.Image):
         self._pil_img = pil_img
+        self._update_profile_label()
         buf = io.BytesIO()
         pil_img.save(buf, format="PNG")
         buf.seek(0)
@@ -421,6 +324,16 @@ class BadgeOffsetCalibrationDialog(QDialog):
         layout.insertWidget(idx, self.canvas, stretch=1)
 
         self._reset()
+
+    def _update_profile_label(self):
+        if self._pil_img is None:
+            return
+        width, height = self._pil_img.size
+        saved = get_badge_offsets(width, height, self.scale_spin.value())
+        suffix = "сохранён" if saved else "новый"
+        self.profile_label.setText(
+            f"Профиль {width}×{height} · {self.scale_spin.value()}% — {suffix}"
+        )
 
     # ---------------------------------------------------------------- #
     #  Step handling                                                     #
@@ -520,9 +433,10 @@ class BadgeOffsetCalibrationDialog(QDialog):
 
     def _save(self):
         offsets = self._compute_offsets()
-        if offsets is None:
+        if offsets is None or self._pil_img is None:
             return
-        save_badge_offsets(offsets)
+        save_badge_offsets(offsets, self._pil_img.width, self._pil_img.height,
+                           self.scale_spin.value())
         mb_info(
             self, "Сохранено",
             f"Калибровка сохранена!\n\n"
